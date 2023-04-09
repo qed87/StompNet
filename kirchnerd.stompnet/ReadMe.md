@@ -26,7 +26,7 @@
 
 [1.9 Quellen](#quellen)
 
-[2 adremes.stompnet](#adremes.stompnet)
+[2 kirchnerd.stompnet](#kirchnerd.stompnet)
 
 [2.1 Überblick](#überblick-2)
 
@@ -307,7 +307,7 @@ vom Plugin unterstützt:
 -   \[http vs. ws\]: Unterschiede zwischen http und WebSockets;\
     <https://www.geeksforgeeks.org/what-is-web-socket-and-how-it-is-different-from-the-http/>
 
-# adremes.stompnet
+# kirchnerd.stompnet
 ## Überblick
 Der ```STOMP```-Driver ist eine Eigenentwicklung, da es für das ```STOMP```-Protokoll 
 keinen offiziellen bzw. aktiven Community-Treiber im .NET-Umfeld gibt.
