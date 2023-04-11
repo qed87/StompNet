@@ -18,6 +18,7 @@ namespace kirchnerd.StompNet.Internals
     /// Implements the STOMP protocol behavior and represents a middleware indirectly used by clients.
     /// </summary>
     [SuppressMessage("ReSharper", "InconsistentlySynchronizedField")]
+    // TODO: Check for SOLID Principles
     internal sealed class StompClient : IDisposable
     {
         public event ErrorHandler? Error;
@@ -307,6 +308,7 @@ namespace kirchnerd.StompNet.Internals
                 StompEventIds.StompClient,
                 $"Received frame {frame.ToString()} on subscription='{subscription.SubscriptionId}', connection='{_connection}'.");
 
+            // TODO: Improve handler delegate
             // call client handler
             var response = await subscription.Handler.Invoke(messageFrame, subscription.Session);
 

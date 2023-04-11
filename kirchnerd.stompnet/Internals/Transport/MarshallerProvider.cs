@@ -5,7 +5,7 @@ using Microsoft.Extensions.Logging;
 namespace kirchnerd.StompNet.Internals.Transport
 {
     /// <summary>
-    /// Provider of marshallers based on the constitution of the input frame.
+    /// Provider of marshaller based on the constitution of the input frame.
     /// </summary>
     internal class MarshallerProvider : IMarshallerProvider
     {
