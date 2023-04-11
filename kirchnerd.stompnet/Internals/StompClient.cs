@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using System.Threading.Tasks;
@@ -29,10 +30,6 @@ namespace kirchnerd.StompNet.Internals
 
         private bool _disposed;
         private readonly string _connection;
-        private readonly object _workerSync = new();
-        private long _workerCnt;
-        private readonly ManualResetEventSlim _workerManualResetEventSlim = new(true);
-        private const int MaxWorkers = 250;
         private readonly FrameBytesRead _readBytes;
         private readonly FrameBytesWrite _writeBytes;
 
@@ -83,60 +80,6 @@ namespace kirchnerd.StompNet.Internals
         private void OnFrameReceived(StompFrame frame)
         {
             Received(frame);
-        }
-
-        /// <summary>
-        /// Starts a worker from the thread pool to the given MAX_WORKER limit.
-        /// This limit should avoid thread exhaustion.
-        /// </summary>
-        /// <param name="worker">The worker to execute.</param>
-        private void StartWorker(Func<Task> worker)
-        {
-            var exit = false;
-            do
-            {
-                _cancelSource.Token.ThrowIfCancellationRequested();
-                _workerManualResetEventSlim.Wait();
-                lock (_workerSync)
-                {
-                    if (_workerCnt >= MaxWorkers)
-                    {
-                        _workerManualResetEventSlim.Reset();
-                        continue;
-                    }
-
-                    _workerCnt += 1;
-                    _logger.LogDebug(StompEventIds.WorkerThreads, $"Start worker #{_workerCnt}");
-                    exit = true;
-                }
-            }
-            while (!exit);
-
-            // check max parallelism to avoid deadlocks due to huge message bursts.
-            ThreadPool.QueueUserWorkItem(_ =>
-            {
-                try
-                {
-                    worker();
-                }
-                finally
-                {
-                    ReleaseWorker();
-                }
-            });
-        }
-
-        /// <summary>
-        /// Releases a started worker.
-        /// </summary>
-        private void ReleaseWorker()
-        {
-            lock (_workerSync)
-            {
-                _logger.LogDebug(StompEventIds.WorkerThreads, $"Release worker #{_workerCnt}");
-                _workerCnt -= 1;
-                _workerManualResetEventSlim.Set();
-            }
         }
 
         /// <summary>
@@ -260,8 +203,9 @@ namespace kirchnerd.StompNet.Internals
         /// and starts a worker to invoke them.
         /// </summary>
         /// <param name="frame"></param>
-        private void NotifyListeners(StompFrame frame)
+        private async void NotifyListeners(StompFrame frame)
         {
+            var handlerTasks = new List<Task>();
             foreach (var (_, listener) in _listeners.ToArray())
             {
                 if (!listener.Check(frame))
@@ -269,8 +213,10 @@ namespace kirchnerd.StompNet.Internals
                     continue;
                 }
 
-                StartWorker(async () => await listener.Handler.Invoke(frame, listener.State));
+                handlerTasks.Add(Task.Run(() => listener.Handler.Invoke(frame, listener.State)));
             }
+
+            await Task.WhenAll(handlerTasks);
         }
 
         internal StompFrame ListenAndRemove(string id)
