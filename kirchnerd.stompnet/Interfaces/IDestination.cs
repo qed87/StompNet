@@ -61,7 +61,16 @@ namespace kirchnerd.StompNet.Interfaces
         /// </summary>
         Task<bool> SubscribeAsync(
             string id,
-            FrameHandlerAsync handler,
+            RequestHandlerAsync handler,
+            AcknowledgeMode acknowledgeMode);
+
+        /// <summary>
+        /// Creates a subscription which starts a message flow from destination (broker-side)
+        /// to the client.
+        /// </summary>
+        Task<bool> SubscribeAsync(
+            string id,
+            SendHandlerAsync handler,
             AcknowledgeMode acknowledgeMode);
 
         /// <summary>

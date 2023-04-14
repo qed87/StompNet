@@ -47,11 +47,14 @@ public class SystemTests
             });
         Assert.IsNotNull(session);
         var tcs = new TaskCompletionSource();
-        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendAndReceive)}", (_, _) =>
-        {
-            tcs.SetResult();
-            return Task.FromResult(SendFrame.Void());
-        }, AcknowledgeMode.Auto);
+        await session.SubscribeAsync(
+            "test-sub",
+            $"/queue/{nameof(CheckSendAndReceive)}", (_, _) =>
+            {
+                tcs.SetResult();
+                return Task.CompletedTask;
+            },
+            AcknowledgeMode.Auto);
         var sendFrame = StompFrame.CreateSend();
         sendFrame.SetBody("Test", "text/plain");
         await session.SendAsync($"/queue/{nameof(CheckSendAndReceive)}", sendFrame);
@@ -83,12 +86,16 @@ public class SystemTests
 
         var countdownEvent = new CountdownEvent(2000);
         var results = new HashSet<string>();
-        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendWithHighLoad)}", (msg, _) =>
-        {
-            results.Add(msg.GetBody());
-            countdownEvent.Signal();
-            return Task.FromResult(SendFrame.Void());
-        }, AcknowledgeMode.ClientIndividual);
+        await session.SubscribeAsync(
+            "test-sub",
+            $"/queue/{nameof(CheckSendWithHighLoad)}",
+            (msg, _) =>
+            {
+                results.Add(msg.GetBody());
+                countdownEvent.Signal();
+                return Task.CompletedTask;
+            },
+            AcknowledgeMode.ClientIndividual);
 
         countdownEvent.Wait(10000);
         sw.Stop();
@@ -110,11 +117,15 @@ public class SystemTests
             });
         Assert.IsNotNull(session);
         var tcs = new TaskCompletionSource();
-        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendWithAcknowledgmentModeClientMode)}", (_, _) =>
-        {
-            tcs.SetResult();
-            return Task.FromResult(SendFrame.Void());
-        }, AcknowledgeMode.Client);
+        await session.SubscribeAsync(
+            "test-sub",
+            $"/queue/{nameof(CheckSendWithAcknowledgmentModeClientMode)}",
+            (_, _) =>
+            {
+                tcs.SetResult();
+                return Task.CompletedTask;
+            },
+            AcknowledgeMode.Client);
         var sendFrame = StompFrame.CreateSend();
         sendFrame.SetBody("Test", "text/plain");
         await session.SendAsync($"/queue/{nameof(CheckSendWithAcknowledgmentModeClientMode)}", sendFrame);
@@ -136,11 +147,15 @@ public class SystemTests
             });
         Assert.IsNotNull(session);
         var tcs = new TaskCompletionSource();
-        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendWithReceipt)}", (_, _) =>
-        {
-            tcs.SetResult();
-            return Task.FromResult(SendFrame.Void());
-        }, AcknowledgeMode.Auto);
+        await session.SubscribeAsync(
+            "test-sub",
+            $"/queue/{nameof(CheckSendWithReceipt)}",
+            (_, _) =>
+            {
+                tcs.SetResult();
+                return Task.CompletedTask;
+            },
+            AcknowledgeMode.Auto);
         var sendFrame = StompFrame.CreateSend();
         sendFrame.SetBody("Test", "text/plain");
         sendFrame.WithReceipt();
@@ -162,12 +177,16 @@ public class SystemTests
                 Passcode = "admin",
             });
         Assert.IsNotNull(session);
-        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckRequestAndReply)}", (msg, ctx) =>
-        {
-            var replyFrame = StompFrame.CreateSend();
-            replyFrame.SetBody("4", "text/plain");
-            return Task.FromResult(replyFrame);
-        }, AcknowledgeMode.Auto);
+        await session.SubscribeAsync(
+            "test-sub",
+            $"/queue/{nameof(CheckRequestAndReply)}",
+            (msg, ctx) =>
+            {
+                var replyFrame = StompFrame.CreateSend();
+                replyFrame.SetBody("4", "text/plain");
+                return Task.FromResult(replyFrame);
+            },
+            AcknowledgeMode.Auto);
         var requestFrame = StompFrame.CreateSend();
         requestFrame.SetBody("3 * 3", "text/plain");
         // TODO: Add broker specific validation for reply-to and other stuff.
