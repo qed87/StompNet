@@ -65,8 +65,6 @@ namespace kirchnerd.StompNet.Internals
                 _timer.Dispose();
             }
 
-            // TODO: free unmanaged resources (unmanaged objects) and override finalizer
-            // TODO: set large fields to null
             _disposed = true;
         }
 
