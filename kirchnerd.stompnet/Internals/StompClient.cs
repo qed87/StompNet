@@ -278,7 +278,7 @@ namespace kirchnerd.StompNet.Internals
             string id,
             string queue,
             ISession session,
-            FrameHandlerAsync handler,
+            RequestHandlerInternalAsync handler,
             AcknowledgeMode acknowledgeMode = AcknowledgeMode.Auto)
         {
             var listener = new Listener(
@@ -308,7 +308,7 @@ namespace kirchnerd.StompNet.Internals
                 $"Received frame {frame.ToString()} on subscription='{subscription.SubscriptionId}', connection='{_connection}'.");
 
             // call client handler
-            var response = await subscription.Handler.Invoke(messageFrame, subscription.Session);
+            var response = (SendFrame)await subscription.Handler.Invoke(messageFrame);
 
             if (response != SendFrame.Void() && frame.HasHeader(StompConstants.Headers.ReplyTo))
             {
@@ -589,7 +589,7 @@ namespace kirchnerd.StompNet.Internals
             public SubscriptionState(
                 string subscriptionId,
                 ISession session,
-                FrameHandlerAsync handler,
+                RequestHandlerInternalAsync handler,
                 AcknowledgeMode acknowledgeMode = AcknowledgeMode.Auto)
             {
                 SubscriptionId = subscriptionId;
@@ -602,7 +602,7 @@ namespace kirchnerd.StompNet.Internals
 
             public ISession Session { get; }
 
-            public FrameHandlerAsync Handler { get; }
+            public RequestHandlerInternalAsync Handler { get; }
 
             public AcknowledgeMode AcknowledgeMode { get; }
 
