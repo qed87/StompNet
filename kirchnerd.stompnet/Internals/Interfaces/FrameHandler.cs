@@ -2,7 +2,6 @@
 using kirchnerd.StompNet.Interfaces;
 using kirchnerd.StompNet.Internals.Transport.Frames;
 
-// TODO: Apply Interface Segregation Principle (ISP)
 namespace kirchnerd.StompNet.Internals.Interfaces
 {
     internal delegate void FrameHandlerInternal(StompFrame frame);

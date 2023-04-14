@@ -104,16 +104,12 @@ namespace kirchnerd.StompNet.Internals
             if (_disposed) return;
             if (disposing)
             {
-                // TODO: dispose managed state (managed objects)
                 _timer.Dispose();
             }
 
-            // TODO: free unmanaged resources (unmanaged objects) and override finalizer
-            // TODO: set large fields to null
             _disposed = true;
         }
 
-        // // TODO: override finalizer only if 'Dispose(bool disposing)' has code to free unmanaged resources
         // ~ReceiptTimer()
         // {
         //     // Do not change this code. Put cleanup code in 'Dispose(bool disposing)' method

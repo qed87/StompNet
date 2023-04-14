@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,11 +14,10 @@ namespace kirchnerd.StompNet.Tests;
 /// </remarks>
 [TestClass]
 [TestCategory("System")]
-// TODO: Update readme on usage of StompDriver
 public class SystemTests
 {
     [TestMethod]
-    public async Task CheckHeartbeat()
+    public async Task CheckThatHeartbeatKeepsConnectionAlive()
     {
         using var session = StompDriver.Connect(
             "stomp://localhost:61613",
@@ -33,8 +33,23 @@ public class SystemTests
         Assert.IsTrue(session.Connection.State == ConnectionState.Established);
     }
 
+    /// <summary>
+    /// Test Scenario 1
+    /// Given
+    /// - The receiver acknowledges frames in auto mode.
+    /// - Sender requests no receipt.
+    /// - Sending frames is done in parallel.
+    /// When
+    /// - Send and Receive 2000 Frames.
+    /// Then
+    /// - The test should finish within 1 second.
+    /// - and all sent frames should be received
+    /// </summary>
+    /// <remarks>
+    /// > 400 frames per Second.
+    /// </remarks>
     [TestMethod]
-    public async Task CheckSendAndReceive()
+    public async Task CheckSendAndReceiveScenario1()
     {
         using var session = StompDriver.Connect(
             "stomp://localhost:61613",
@@ -46,21 +61,51 @@ public class SystemTests
                 Passcode = "admin",
             });
         Assert.IsNotNull(session);
-        var tcs = new TaskCompletionSource();
-        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendAndReceive)}", (_, _) =>
+        var sw = new Stopwatch();
+        sw.Start();
+        var sendTasks = new List<Task>();
+        for (var i = 0; i < 2000; i++)
         {
-            tcs.SetResult();
+            var sendFrame = StompFrame.CreateSend();
+            sendFrame.SetBody($"Test {i}", "text/plain");
+            sendTasks.Add(session.SendAsync($"/queue/{nameof(CheckSendAndReceiveScenario1)}", sendFrame));
+        }
+
+        await Task.WhenAll(sendTasks);
+
+        var countdownEvent = new CountdownEvent(2000);
+        var results = new HashSet<string>();
+        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendAndReceiveScenario1)}", (msg, _) =>
+        {
+            results.Add(msg.GetBody());
+            countdownEvent.Signal();
             return Task.FromResult(SendFrame.Void());
         }, AcknowledgeMode.Auto);
-        var sendFrame = StompFrame.CreateSend();
-        sendFrame.SetBody("Test", "text/plain");
-        await session.SendAsync($"/queue/{nameof(CheckSendAndReceive)}", sendFrame);
-        await Task.WhenAny(tcs.Task, Task.Delay(1000));
-        Assert.IsTrue(tcs.Task.IsCompleted);
+
+        countdownEvent.Wait(10000);
+        sw.Stop();
+        Console.WriteLine($"Test duration: {sw.ElapsedMilliseconds}");
+        Assert.AreEqual(2000, results.Count);
+        Assert.IsTrue(sw.ElapsedMilliseconds < 1000);
     }
 
+    /// <summary>
+    /// Test Scenario 2
+    /// Given
+    /// - The receiver acknowledges frames in auto.
+    /// - Sender requests no receipt.
+    /// - Sending frames is done in sync.
+    /// When
+    /// - Send and Receive 2000 Frames.
+    /// Then
+    /// - The test should finish within 1.5 second.
+    /// - and all sent frames should be received
+    /// </summary>
+    /// <remarks>
+    /// > 400 frames per Second.
+    /// </remarks>
     [TestMethod]
-    public async Task CheckSendWithHighLoad()
+    public async Task CheckSendAndReceiveScenario2()
     {
         using var session = StompDriver.Connect(
             "stomp://localhost:61613",
@@ -78,12 +123,403 @@ public class SystemTests
         {
             var sendFrame = StompFrame.CreateSend();
             sendFrame.SetBody($"Test {i}", "text/plain");
-            await session.SendAsync($"/queue/{nameof(CheckSendWithHighLoad)}", sendFrame);
+            await session.SendAsync($"/queue/{nameof(CheckSendAndReceiveScenario2)}", sendFrame);
         }
 
         var countdownEvent = new CountdownEvent(2000);
         var results = new HashSet<string>();
-        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendWithHighLoad)}", (msg, _) =>
+        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendAndReceiveScenario2)}", (msg, _) =>
+        {
+            results.Add(msg.GetBody());
+            countdownEvent.Signal();
+            return Task.FromResult(SendFrame.Void());
+        }, AcknowledgeMode.Auto);
+
+        countdownEvent.Wait(10000);
+        sw.Stop();
+        Console.WriteLine($"Test duration: {sw.ElapsedMilliseconds}");
+        Assert.AreEqual(2000, results.Count);
+        Assert.IsTrue(sw.ElapsedMilliseconds < 1500);
+    }
+
+    /// <summary>
+    /// Test Scenario 3
+    /// Given
+    /// - The receiver acknowledges frames in auto mode.
+    /// - Sender requests a receipt.
+    /// - Sending frames is done in parallel.
+    /// When
+    /// - Send and Receive 2000 Frames.
+    /// Then
+    /// - The test should finish within 2 second.
+    /// - and all sent frames should be received
+    /// </summary>
+    /// <remarks>
+    /// > 400 frames per Second.
+    /// </remarks>
+    [TestMethod]
+    public async Task CheckSendAndReceiveScenario3()
+    {
+        using var session = StompDriver.Connect(
+            "stomp://localhost:61613",
+            new StompOptions
+            {
+                IncomingHeartBeat = 5000,
+                OutgoingHeartBeat = 5000,
+                Login = "admin",
+                Passcode = "admin",
+            });
+        Assert.IsNotNull(session);
+        var sw = new Stopwatch();
+        sw.Start();
+        var sendTasks = new List<Task>();
+        for (var i = 0; i < 2000; i++)
+        {
+            var sendFrame = StompFrame.CreateSend();
+            sendFrame.SetBody($"Test {i}", "text/plain");
+            sendFrame.WithReceipt();
+            sendTasks.Add(session.SendAsync($"/queue/{nameof(CheckSendAndReceiveScenario3)}", sendFrame));
+        }
+
+        await Task.WhenAll(sendTasks);
+
+        var countdownEvent = new CountdownEvent(2000);
+        var results = new HashSet<string>();
+        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendAndReceiveScenario3)}", (msg, _) =>
+        {
+            results.Add(msg.GetBody());
+            countdownEvent.Signal();
+            return Task.FromResult(SendFrame.Void());
+        }, AcknowledgeMode.Auto);
+
+        countdownEvent.Wait(10000);
+        sw.Stop();
+        Console.WriteLine($"Test duration: {sw.ElapsedMilliseconds}");
+        Assert.AreEqual(2000, results.Count);
+        Assert.IsTrue(sw.ElapsedMilliseconds < 2000);
+    }
+
+    /// <summary>
+    /// Test Scenario 4
+    /// Given
+    /// - The receiver acknowledges frames in auto mode.
+    /// - Sender requests a receipt.
+    /// - Sending frames is done in sync.
+    /// When
+    /// - Send and Receive 200 Frames.
+    /// Then
+    /// - The test should finish within 25 second.
+    /// - and all sent frames should be received
+    /// </summary>
+    /// <remarks>
+    /// Only ~10 Frames per Second.
+    /// My assumption is that rabbit mq sends (cumulative) receipts in regular intervals.
+    /// When we wait for a receipt synchronously this slows down the send rate.
+    /// </remarks>
+    [TestMethod]
+    public async Task CheckSendAndReceiveScenario4()
+    {
+        using var session = StompDriver.Connect(
+            "stomp://localhost:61613",
+            new StompOptions
+            {
+                IncomingHeartBeat = 5000,
+                OutgoingHeartBeat = 5000,
+                Login = "admin",
+                Passcode = "admin",
+            });
+        Assert.IsNotNull(session);
+        var sw = new Stopwatch();
+        sw.Start();
+        for (var i = 0; i < 200; i++)
+        {
+            var sendFrame = StompFrame.CreateSend();
+            sendFrame.SetBody($"Test {i}", "text/plain");
+            sendFrame.WithReceipt();
+            await session.SendAsync($"/queue/{nameof(CheckSendAndReceiveScenario4)}", sendFrame);
+        }
+
+        var countdownEvent = new CountdownEvent(200);
+        var results = new HashSet<string>();
+        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendAndReceiveScenario4)}", (msg, _) =>
+        {
+            results.Add(msg.GetBody());
+            countdownEvent.Signal();
+            return Task.FromResult(SendFrame.Void());
+        }, AcknowledgeMode.Auto);
+
+        countdownEvent.Wait(30000);
+        sw.Stop();
+        Console.WriteLine($"Test duration: {sw.ElapsedMilliseconds}");
+        Assert.AreEqual(200, results.Count);
+        Assert.IsTrue(sw.ElapsedMilliseconds < 25000);
+    }
+
+    /// <summary>
+    /// Test Scenario 5
+    /// Given
+    /// - The receiver acknowledges frames in client mode.
+    /// - Sender requests no receipt.
+    /// - Sending frames is done in parallel.
+    /// When
+    /// - Send and Receive 2000 Frames.
+    /// Then
+    /// - The test should finish within 1.5 second.
+    /// - and all sent frames should be received
+    /// </summary>
+    /// <remarks>
+    /// > 400 frames per Second.
+    /// </remarks>
+    [TestMethod]
+    public async Task CheckSendAndReceiveScenario5()
+    {
+        using var session = StompDriver.Connect(
+            "stomp://localhost:61613",
+            new StompOptions
+            {
+                IncomingHeartBeat = 5000,
+                OutgoingHeartBeat = 5000,
+                Login = "admin",
+                Passcode = "admin",
+            });
+        Assert.IsNotNull(session);
+        var sw = new Stopwatch();
+        sw.Start();
+        var sendTasks = new List<Task>();
+        for (var i = 0; i < 2000; i++)
+        {
+            var sendFrame = StompFrame.CreateSend();
+            sendFrame.SetBody($"Test {i}", "text/plain");
+            sendTasks.Add(session.SendAsync($"/queue/{nameof(CheckSendAndReceiveScenario5)}", sendFrame));
+        }
+
+        await Task.WhenAll(sendTasks);
+
+        var countdownEvent = new CountdownEvent(2000);
+        var results = new HashSet<string>();
+        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendAndReceiveScenario5)}", (msg, _) =>
+        {
+            results.Add(msg.GetBody());
+            countdownEvent.Signal();
+            return Task.FromResult(SendFrame.Void());
+        }, AcknowledgeMode.Client);
+
+        countdownEvent.Wait(10000);
+        sw.Stop();
+        Console.WriteLine($"Test duration: {sw.ElapsedMilliseconds}");
+        Assert.AreEqual(2000, results.Count);
+        Assert.IsTrue(sw.ElapsedMilliseconds < 1500);
+    }
+
+    /// <summary>
+    /// Test Scenario 6
+    /// Given
+    /// - The receiver acknowledges frames in client.
+    /// - Sender requests no receipt.
+    /// - Sending frames is done in sync.
+    /// When
+    /// - Send and Receive 2000 Frames.
+    /// Then
+    /// - The test should finish within 2 second.
+    /// - and all sent frames should be received
+    /// </summary>
+    /// <remarks>
+    /// > 400 frames per Second.
+    /// </remarks>
+    [TestMethod]
+    public async Task CheckSendAndReceiveScenario6()
+    {
+        using var session = StompDriver.Connect(
+            "stomp://localhost:61613",
+            new StompOptions
+            {
+                IncomingHeartBeat = 5000,
+                OutgoingHeartBeat = 5000,
+                Login = "admin",
+                Passcode = "admin",
+            });
+        Assert.IsNotNull(session);
+        var sw = new Stopwatch();
+        sw.Start();
+        for (var i = 0; i < 2000; i++)
+        {
+            var sendFrame = StompFrame.CreateSend();
+            sendFrame.SetBody($"Test {i}", "text/plain");
+            await session.SendAsync($"/queue/{nameof(CheckSendAndReceiveScenario6)}", sendFrame);
+        }
+
+        var countdownEvent = new CountdownEvent(2000);
+        var results = new HashSet<string>();
+        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendAndReceiveScenario6)}", (msg, _) =>
+        {
+            results.Add(msg.GetBody());
+            countdownEvent.Signal();
+            return Task.FromResult(SendFrame.Void());
+        }, AcknowledgeMode.Client);
+
+        countdownEvent.Wait(10000);
+        sw.Stop();
+        Console.WriteLine($"Test duration: {sw.ElapsedMilliseconds}");
+        Assert.AreEqual(2000, results.Count);
+        Assert.IsTrue(sw.ElapsedMilliseconds < 2000);
+    }
+
+    /// <summary>
+    /// Test Scenario 7
+    /// Given
+    /// - The receiver acknowledges frames in client mode.
+    /// - Sender requests a receipt.
+    /// - Sending frames is done in parallel.
+    /// When
+    /// - Send and Receive 2000 Frames.
+    /// Then
+    /// - The test should finish within 2 second.
+    /// - and all sent frames should be received
+    /// </summary>
+    /// <remarks>
+    /// > 400 frames per Second.
+    /// </remarks>
+    [TestMethod]
+    public async Task CheckSendAndReceiveScenario7()
+    {
+        using var session = StompDriver.Connect(
+            "stomp://localhost:61613",
+            new StompOptions
+            {
+                IncomingHeartBeat = 5000,
+                OutgoingHeartBeat = 5000,
+                Login = "admin",
+                Passcode = "admin",
+            });
+        Assert.IsNotNull(session);
+        var sw = new Stopwatch();
+        sw.Start();
+        var sendTasks = new List<Task>();
+        for (var i = 0; i < 2000; i++)
+        {
+            var sendFrame = StompFrame.CreateSend();
+            sendFrame.SetBody($"Test {i}", "text/plain");
+            sendFrame.WithReceipt();
+            sendTasks.Add(session.SendAsync($"/queue/{nameof(CheckSendAndReceiveScenario7)}", sendFrame));
+        }
+
+        await Task.WhenAll(sendTasks);
+
+        var countdownEvent = new CountdownEvent(2000);
+        var results = new HashSet<string>();
+        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendAndReceiveScenario7)}", (msg, _) =>
+        {
+            results.Add(msg.GetBody());
+            countdownEvent.Signal();
+            return Task.FromResult(SendFrame.Void());
+        }, AcknowledgeMode.Client);
+
+        countdownEvent.Wait(10000);
+        sw.Stop();
+        Console.WriteLine($"Test duration: {sw.ElapsedMilliseconds}");
+        Assert.AreEqual(2000, results.Count);
+        Assert.IsTrue(sw.ElapsedMilliseconds < 2000);
+    }
+
+    /// <summary>
+    /// Test Scenario 8
+    /// Given
+    /// - The receiver acknowledges frames in auto mode.
+    /// - Sender requests a receipt.
+    /// - Sending frames is done in sync.
+    /// When
+    /// - Send and Receive 200 Frames.
+    /// Then
+    /// - The test should finish within 25 second.
+    /// - and all sent frames should be received
+    /// </summary>
+    /// <remarks>
+    /// Only ~10 Frames per Second.
+    /// My assumption is that rabbit mq sends (cumulative) receipts in regular intervals.
+    /// When we wait for a receipt synchronously this slows down the send rate.
+    /// </remarks>
+    [TestMethod]
+    public async Task CheckSendAndReceiveScenario8()
+    {
+        using var session = StompDriver.Connect(
+            "stomp://localhost:61613",
+            new StompOptions
+            {
+                IncomingHeartBeat = 5000,
+                OutgoingHeartBeat = 5000,
+                Login = "admin",
+                Passcode = "admin",
+            });
+        Assert.IsNotNull(session);
+        var sw = new Stopwatch();
+        sw.Start();
+        for (var i = 0; i < 200; i++)
+        {
+            var sendFrame = StompFrame.CreateSend();
+            sendFrame.SetBody($"Test {i}", "text/plain");
+            sendFrame.WithReceipt();
+            await session.SendAsync($"/queue/{nameof(CheckSendAndReceiveScenario8)}", sendFrame);
+        }
+
+        var countdownEvent = new CountdownEvent(200);
+        var results = new HashSet<string>();
+        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendAndReceiveScenario8)}", (msg, _) =>
+        {
+            results.Add(msg.GetBody());
+            countdownEvent.Signal();
+            return Task.FromResult(SendFrame.Void());
+        }, AcknowledgeMode.Client);
+
+        countdownEvent.Wait(30000);
+        sw.Stop();
+        Console.WriteLine($"Test duration: {sw.ElapsedMilliseconds}");
+        Assert.AreEqual(200, results.Count);
+        Assert.IsTrue(sw.ElapsedMilliseconds < 25000);
+    }
+
+    /// <summary>
+    /// Test Scenario 9
+    /// Given
+    /// - The receiver acknowledges frames in client-individual mode.
+    /// - Sender requests no receipt.
+    /// - Sending frames is done in parallel.
+    /// When
+    /// - Send and Receive 2000 Frames.
+    /// Then
+    /// - The test should finish within 1.5 second.
+    /// - and all sent frames should be received
+    /// </summary>
+    /// <remarks>
+    /// > 400 frames per Second.
+    /// </remarks>
+    [TestMethod]
+    public async Task CheckSendAndReceiveScenario9()
+    {
+        using var session = StompDriver.Connect(
+            "stomp://localhost:61613",
+            new StompOptions
+            {
+                IncomingHeartBeat = 5000,
+                OutgoingHeartBeat = 5000,
+                Login = "admin",
+                Passcode = "admin",
+            });
+        Assert.IsNotNull(session);
+        var sw = new Stopwatch();
+        sw.Start();
+        var sendTasks = new List<Task>();
+        for (var i = 0; i < 2000; i++)
+        {
+            var sendFrame = StompFrame.CreateSend();
+            sendFrame.SetBody($"Test {i}", "text/plain");
+            sendTasks.Add(session.SendAsync($"/queue/{nameof(CheckSendAndReceiveScenario9)}", sendFrame));
+        }
+
+        await Task.WhenAll(sendTasks);
+
+        var countdownEvent = new CountdownEvent(2000);
+        var results = new HashSet<string>();
+        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendAndReceiveScenario9)}", (msg, _) =>
         {
             results.Add(msg.GetBody());
             countdownEvent.Signal();
@@ -92,12 +528,28 @@ public class SystemTests
 
         countdownEvent.Wait(10000);
         sw.Stop();
+        Console.WriteLine($"Test duration: {sw.ElapsedMilliseconds}");
         Assert.AreEqual(2000, results.Count);
-        Assert.IsTrue(sw.ElapsedMilliseconds < 5000);
+        Assert.IsTrue(sw.ElapsedMilliseconds < 1500);
     }
 
+    /// <summary>
+    /// Test Scenario 10
+    /// Given
+    /// - The receiver acknowledges frames in client-individual.
+    /// - Sender requests no receipt.
+    /// - Sending frames is done in sync.
+    /// When
+    /// - Send and Receive 2000 Frames.
+    /// Then
+    /// - The test should finish within 1.5 second.
+    /// - and all sent frames should be received
+    /// </summary>
+    /// <remarks>
+    /// > 400 frames per Second.
+    /// </remarks>
     [TestMethod]
-    public async Task CheckSendWithAcknowledgmentModeClientMode()
+    public async Task CheckSendAndReceiveScenario10()
     {
         using var session = StompDriver.Connect(
             "stomp://localhost:61613",
@@ -109,21 +561,48 @@ public class SystemTests
                 Passcode = "admin",
             });
         Assert.IsNotNull(session);
-        var tcs = new TaskCompletionSource();
-        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendWithAcknowledgmentModeClientMode)}", (_, _) =>
+        var sw = new Stopwatch();
+        sw.Start();
+        for (var i = 0; i < 2000; i++)
         {
-            tcs.SetResult();
+            var sendFrame = StompFrame.CreateSend();
+            sendFrame.SetBody($"Test {i}", "text/plain");
+            await session.SendAsync($"/queue/{nameof(CheckSendAndReceiveScenario10)}", sendFrame);
+        }
+
+        var countdownEvent = new CountdownEvent(2000);
+        var results = new HashSet<string>();
+        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendAndReceiveScenario10)}", (msg, _) =>
+        {
+            results.Add(msg.GetBody());
+            countdownEvent.Signal();
             return Task.FromResult(SendFrame.Void());
-        }, AcknowledgeMode.Client);
-        var sendFrame = StompFrame.CreateSend();
-        sendFrame.SetBody("Test", "text/plain");
-        await session.SendAsync($"/queue/{nameof(CheckSendWithAcknowledgmentModeClientMode)}", sendFrame);
-        await Task.WhenAny(tcs.Task, Task.Delay(1000));
-        Assert.IsTrue(tcs.Task.IsCompleted);
+        }, AcknowledgeMode.ClientIndividual);
+
+        countdownEvent.Wait(10000);
+        sw.Stop();
+        Console.WriteLine($"Test duration: {sw.ElapsedMilliseconds}");
+        Assert.AreEqual(2000, results.Count);
+        Assert.IsTrue(sw.ElapsedMilliseconds < 1500);
     }
 
+    /// <summary>
+    /// Test Scenario 11
+    /// Given
+    /// - The receiver acknowledges frames in client-individual mode.
+    /// - Sender requests a receipt.
+    /// - Sending frames is done in parallel.
+    /// When
+    /// - Send and Receive 2000 Frames.
+    /// Then
+    /// - The test should finish within 2 second.
+    /// - and all sent frames should be received
+    /// </summary>
+    /// <remarks>
+    /// > 400 frames per Second.
+    /// </remarks>
     [TestMethod]
-    public async Task CheckSendWithReceipt()
+    public async Task CheckSendAndReceiveScenario11()
     {
         using var session = StompDriver.Connect(
             "stomp://localhost:61613",
@@ -135,18 +614,89 @@ public class SystemTests
                 Passcode = "admin",
             });
         Assert.IsNotNull(session);
-        var tcs = new TaskCompletionSource();
-        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendWithReceipt)}", (_, _) =>
+        var sw = new Stopwatch();
+        sw.Start();
+        var sendTasks = new List<Task>();
+        for (var i = 0; i < 2000; i++)
         {
-            tcs.SetResult();
+            var sendFrame = StompFrame.CreateSend();
+            sendFrame.SetBody($"Test {i}", "text/plain");
+            sendFrame.WithReceipt();
+            sendTasks.Add(session.SendAsync($"/queue/{nameof(CheckSendAndReceiveScenario11)}", sendFrame));
+        }
+
+        await Task.WhenAll(sendTasks);
+
+        var countdownEvent = new CountdownEvent(2000);
+        var results = new HashSet<string>();
+        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendAndReceiveScenario11)}", (msg, _) =>
+        {
+            results.Add(msg.GetBody());
+            countdownEvent.Signal();
             return Task.FromResult(SendFrame.Void());
-        }, AcknowledgeMode.Auto);
-        var sendFrame = StompFrame.CreateSend();
-        sendFrame.SetBody("Test", "text/plain");
-        sendFrame.WithReceipt();
-        await session.SendAsync($"/queue/{nameof(CheckSendWithReceipt)}", sendFrame);
-        await Task.WhenAny(tcs.Task, Task.Delay(1000));
-        Assert.IsTrue(tcs.Task.IsCompleted);
+        }, AcknowledgeMode.ClientIndividual);
+
+        countdownEvent.Wait(10000);
+        sw.Stop();
+        Console.WriteLine($"Test duration: {sw.ElapsedMilliseconds}");
+        Assert.AreEqual(2000, results.Count);
+        Assert.IsTrue(sw.ElapsedMilliseconds < 2000);
+    }
+
+    /// <summary>
+    /// Test Scenario 12
+    /// Given
+    /// - The receiver acknowledges frames in auto mode.
+    /// - Sender requests a receipt.
+    /// - Sending frames is done in sync.
+    /// When
+    /// - Send and Receive 200 Frames.
+    /// Then
+    /// - The test should finish within 25 second.
+    /// - and all sent frames should be received
+    /// </summary>
+    /// <remarks>
+    /// Only ~10 Frames per Second.
+    /// My assumption is that rabbit mq sends (cumulative) receipts in regular intervals.
+    /// When we wait for a receipt synchronously this slows down the send rate.
+    /// </remarks>
+    [TestMethod]
+    public async Task CheckSendAndReceiveScenario12()
+    {
+        using var session = StompDriver.Connect(
+            "stomp://localhost:61613",
+            new StompOptions
+            {
+                IncomingHeartBeat = 5000,
+                OutgoingHeartBeat = 5000,
+                Login = "admin",
+                Passcode = "admin",
+            });
+        Assert.IsNotNull(session);
+        var sw = new Stopwatch();
+        sw.Start();
+        for (var i = 0; i < 200; i++)
+        {
+            var sendFrame = StompFrame.CreateSend();
+            sendFrame.SetBody($"Test {i}", "text/plain");
+            sendFrame.WithReceipt();
+            await session.SendAsync($"/queue/{nameof(CheckSendAndReceiveScenario12)}", sendFrame);
+        }
+
+        var countdownEvent = new CountdownEvent(200);
+        var results = new HashSet<string>();
+        await session.SubscribeAsync("test-sub", $"/queue/{nameof(CheckSendAndReceiveScenario12)}", (msg, _) =>
+        {
+            results.Add(msg.GetBody());
+            countdownEvent.Signal();
+            return Task.FromResult(SendFrame.Void());
+        }, AcknowledgeMode.ClientIndividual);
+
+        countdownEvent.Wait(30000);
+        sw.Stop();
+        Console.WriteLine($"Test duration: {sw.ElapsedMilliseconds}");
+        Assert.AreEqual(200, results.Count);
+        Assert.IsTrue(sw.ElapsedMilliseconds < 25000);
     }
 
     [TestMethod]
@@ -170,8 +720,6 @@ public class SystemTests
         }, AcknowledgeMode.Auto);
         var requestFrame = StompFrame.CreateSend();
         requestFrame.SetBody("3 * 3", "text/plain");
-        // TODO: Add broker specific validation for reply-to and other stuff.
-        // TODO: This could happen based on the information from CONNECTED header
         requestFrame.ReplyTo("/temp-queue/answer");
         var reply = await session.RequestAsync($"/queue/{nameof(CheckRequestAndReply)}", requestFrame, 1000);
         Assert.AreEqual("4", reply.GetBody());
