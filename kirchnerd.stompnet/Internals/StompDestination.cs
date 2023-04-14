@@ -48,10 +48,29 @@ namespace kirchnerd.StompNet.Internals
         }
 
         /// <inheritdoc />
-        public Task<bool> SubscribeAsync(string id, FrameHandlerAsync handler, AcknowledgeMode acknowledgeMode)
+        public Task<bool> SubscribeAsync(string id, RequestHandlerAsync handler, AcknowledgeMode acknowledgeMode)
         {
-            return _stompClient.SubscribeAsync(id, _destination, _session,
-                handler, acknowledgeMode);
+            return _stompClient.SubscribeAsync(
+                id,
+                _destination,
+                _session,
+                async msg => await handler((MessageFrame) msg, _session),
+                acknowledgeMode);
+        }
+
+        /// <inheritdoc />
+        public Task<bool> SubscribeAsync(string id, SendHandlerAsync handler, AcknowledgeMode acknowledgeMode)
+        {
+            return _stompClient.SubscribeAsync(
+                id,
+                _destination,
+                _session,
+                async msg =>
+                {
+                    await handler((MessageFrame) msg, _session);
+                    return SendFrame.Void();
+                },
+                acknowledgeMode);
         }
 
         /// <inheritdoc />
