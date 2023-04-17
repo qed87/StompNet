@@ -91,12 +91,7 @@ namespace kirchnerd.StompNet
                                 connectFrame.SetHeader(StompConstants.Headers.Passcode, _stompOptions.Passcode);
                             }
 
-                            var listenerId = _stompClient.AddListener(
-                                frame => string.Equals(frame.Command, StompConstants.Commands.Connected,
-                                    StringComparison.OrdinalIgnoreCase));
-                            _stompClient.Send(connectFrame);
-                            var connectedFrame = _stompClient.ListenAndRemove(listenerId);
-
+                            var connectedFrame = _stompClient.Connect(connectFrame);
                             if (connectedFrame is null) throw new StompException("Connection failed.");
                             ConfigureHeartbeat(connectedFrame, cx, cy);
 

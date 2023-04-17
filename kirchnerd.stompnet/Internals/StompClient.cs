@@ -1,6 +1,6 @@
 ﻿using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using System.Threading.Tasks;
@@ -8,6 +8,8 @@ using kirchnerd.StompNet.Exceptions;
 using kirchnerd.StompNet.Extensions;
 using kirchnerd.StompNet.Interfaces;
 using kirchnerd.StompNet.Internals.Interfaces;
+using kirchnerd.StompNet.Internals.Middleware;
+using kirchnerd.StompNet.Internals.Services;
 using kirchnerd.StompNet.Internals.Transport;
 using kirchnerd.StompNet.Internals.Transport.Frames;
 using Microsoft.Extensions.Logging;
@@ -17,16 +19,17 @@ namespace kirchnerd.StompNet.Internals
     /// <summary>
     /// Implements the STOMP protocol behavior and represents a middleware indirectly used by clients.
     /// </summary>
+    /// <remarks>
+    /// Orchestrates the messaging components.
+    /// </remarks>
     [SuppressMessage("ReSharper", "InconsistentlySynchronizedField")]
     internal sealed class StompClient : IDisposable
     {
         public event ErrorHandler? Error;
-        private void OnError(Exception ex)
+        internal void OnError(Exception ex)
         {
             Error?.Invoke(ex);
         }
-
-        private long _lastAck;
 
         private bool _disposed;
         private readonly string _connection;
@@ -34,17 +37,18 @@ namespace kirchnerd.StompNet.Internals
         private readonly FrameBytesWrite _writeBytes;
 
         private readonly ILogger<StompDriver> _logger;
-        private readonly ReceiptTimer _receiptTimer;
-        private readonly HeartbeatTimer _heartbeatIn;
-        private readonly HeartbeatTimer _heartbeatOut;
+        private readonly IReceiptService _receiptService;
+        private readonly IAcknowledgeService _acknowledgeService;
+        private readonly ISubscriptionService _subscriptionService;
+        private readonly IHeartbeatService _heartbeatIn;
+        private readonly IHeartbeatService _heartbeatOut;
         private readonly CancellationTokenSource _cancelSource = new();
-        private readonly ConcurrentDictionary<string, Listener> _listeners = new();
-        private readonly ConcurrentDictionary<string, Acknowledgement> _acknowledged = new();
 
         private StompOutbox _outbox = null!;
         private Thread _outboxThread = null!;
         private StompInbox _inbox = null!;
         private Thread _inboxThread = null!;
+        private Pipeline<OutboxContext> _sendPipeline = null!;
 
         public StompClient(
             string connection,
@@ -56,11 +60,11 @@ namespace kirchnerd.StompNet.Internals
             _readBytes = readBytes;
             _writeBytes = writeBytes;
             _logger = logger;
-            _receiptTimer = new ReceiptTimer();
-            _heartbeatIn = new HeartbeatTimer(() => OnError(new StompHeartbeatMissingException()));
-            _heartbeatOut = new HeartbeatTimer(
-                () => Send(StompFrame.CreateHeartbeat(FrameType.Client),
-                CancellationToken.None));
+            _receiptService = new ReceiptService();
+            _heartbeatIn = new InboxHeartbeatService(this);
+            _heartbeatOut = new OutboxHeartbeatService(this);
+            _subscriptionService = new SubscriptionService(_logger);
+            _acknowledgeService = new AcknowledgeService(logger, _subscriptionService);
 
             StartUpStompInbox();
             StartUpStompOutbox();
@@ -77,217 +81,24 @@ namespace kirchnerd.StompNet.Internals
             _cancelSource.Cancel();
         }
 
-        private void OnFrameReceived(StompFrame frame)
+        public ConnectedFrame Connect(ConnectFrame connectFrame)
         {
-            Received(frame);
-        }
-
-        /// <summary>
-        /// This callback is invoked by the stomp inbox whenever a new frame is received.
-        /// This method is invoked within the inbox thread, therefor no blocking should happen here.
-        /// </summary>
-        /// <param name="frame">The received frame.</param>
-        private void Received(StompFrame frame)
-        {
-            _logger.LogDebug(
-                StompEventIds.StompClient,
-                $"Received frame {frame.ToString()}.");
-            var shouldNotify = false;
-            if (string.Equals(frame.Command, StompConstants.Commands.Receipt,
-                StringComparison.OrdinalIgnoreCase))
-            {
-                var receiptId = frame.GetHeader(StompConstants.Headers.ReceiptId);
-                _receiptTimer.Receive(receiptId);
-            }
-            else if (string.Equals(frame.Command, StompConstants.Commands.Message,
-                StringComparison.OrdinalIgnoreCase))
-            {
-                var subscriptionId = frame.GetHeader(StompConstants.Headers.SubscriptionId);
-                if (frame.HasHeader(StompConstants.Headers.Ack))
-                {
-                    // The server requires an acknowledgment of the given message.
-                    var ackId = frame.GetHeader(StompConstants.Headers.Ack);
-                    _logger.LogDebug(
-                        StompEventIds.StompClient,
-                        $"Create acknowledgment for {frame.ToString()} for subscription '{subscriptionId}'.");
-                    var acknowledgment = new Acknowledgement(
-                        subscriptionId,
-                        frame.GetHeader<long>(StompConstants.Headers.Internal.Received));
-                    _acknowledged.TryAdd(
-                        ackId,
-                        acknowledgment);
-                }
-
-                shouldNotify = true;
-            }
-            else if (string.Equals(frame.Command, StompConstants.Commands.Connected, StringComparison.OrdinalIgnoreCase))
-            {
-                shouldNotify = true;
-            }
-            else if (string.Equals(frame.Command, StompConstants.Commands.Error, StringComparison.OrdinalIgnoreCase))
-            {
-                OnError(new StompFrameException(frame, frame.GetBody()));
-            }
-            else
-            {
-                _logger.LogWarning(
-                    StompEventIds.Inbox,
-                    $"Unknown frame: {frame.ToString()}");
-            }
-
-            UpdateIncomingHeartbeat();
-
-            if (shouldNotify)
-                NotifyListeners(frame);
-        }
-
-        private void UpdateIncomingHeartbeat()
-        {
-            _logger.LogTrace(
-                StompEventIds.StompClient,
-                $"Update incoming heartbeat.");
-            _heartbeatIn.Update();
-        }
-
-        /// <summary>
-        /// Callback invoked before a frame is transmitted over the wire.
-        /// This callback filters out ack/nack's which are redundant.
-        /// </summary>
-        /// <param name="sendingContext">The sending context.</param>
-        public void Sending(SendingContext sendingContext)
-        {
-            var frame = sendingContext.Frame;
-            if (!string.Equals(frame.Command, StompConstants.Commands.Ack, StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(frame.Command, StompConstants.Commands.Nack, StringComparison.OrdinalIgnoreCase)) return;
-            if (!_acknowledged.TryRemove(frame.GetHeader(StompConstants.Headers.AckId), out var acknowledgment) ||
-                !_listeners.TryGetValue(acknowledgment.SubscriptionId, out var listener)) return;
-            var subscription = (SubscriptionState)listener.State;
-            switch (subscription.AcknowledgeMode)
-            {
-                case AcknowledgeMode.Auto:
-                    _logger.LogDebug(
-                        StompEventIds.StompClient,
-                        $"Skip ack/nack since subscription with Id='{acknowledgment.SubscriptionId}' is in mode 'auto'.");
-                    sendingContext.Cancel();
-                    return;
-                case AcknowledgeMode.Client when acknowledgment.Timestamp <= _lastAck:
-                    _logger.LogDebug(
-                        StompEventIds.StompClient,
-                        $"Skip ack/nack since subscription with Id='{acknowledgment.SubscriptionId}' "
-                        + "is in mode 'client' and a more recent message frame is already acknowledged.");
-                    sendingContext.Cancel();
-                    return;
-                default:
-                    _logger.LogTrace(
-                        StompEventIds.StompClient,
-                        $"Update acknowledge timestamp.");
-                    Interlocked.Exchange(ref _lastAck, acknowledgment.Timestamp);
-                    break;
-            }
-        }
-
-        /// <summary>
-        /// Callback which is invoked after a new frame is sent. This handler updates the outgoing heartbeat.
-        /// </summary>
-        /// <param name="ctx"></param>
-        public void Sent(SentContext ctx)
-        {
-            _logger.LogTrace(
-                StompEventIds.StompClient,
-                $"Update outgoing heartbeat.");
-            _heartbeatOut.Update();
-        }
-
-        /// <summary>
-        /// Detects custom handlers which are interested at the given frame
-        /// and starts a worker to invoke them.
-        /// </summary>
-        /// <param name="frame"></param>
-        private async void NotifyListeners(StompFrame frame)
-        {
-            var handlerTasks = new List<Task>();
-            foreach (var (_, listener) in _listeners.ToArray())
-            {
-                if (!listener.Check(frame))
-                {
-                    continue;
-                }
-
-                handlerTasks.Add(Task.Run(() => listener.Handler.Invoke(frame, listener.State)));
-            }
-
-            await Task.WhenAll(handlerTasks);
-        }
-
-        internal StompFrame ListenAndRemove(string id)
-        {
-            return ListenAndRemoveAsync(id).GetAwaiter().GetResult();
-        }
-
-        private async Task<StompFrame> ListenAndRemoveAsync(string id)
-        {
-            if (!_listeners.TryGetValue(id, out var listener))
-                throw new ApplicationException($"Listener '{id}' is already removed.");
-
-            try
-            {
-                var state = (ListenerState)listener.State;
-                await state.TaskCompletionSource.Task;
-                return state.Result;
-            }
-            finally
-            {
-                RemoveListener(id);
-            }
-        }
-
-        internal string AddListener(Predicate<StompFrame> predicate)
-        {
-            var listenerId = Guid.NewGuid().ToString().Replace("-", "");
-            var listenerState = new ListenerState();
-            var listener = new Listener(predicate, (frame, state) =>
-            {
-                var callbackState = (ListenerState)state;
-                if (Interlocked.CompareExchange(ref callbackState.Set, 1, 0) != 0) return Task.CompletedTask;
-                callbackState.Result = frame;
-                callbackState.ManualResetEvent.Set();
-                callbackState.TaskCompletionSource.TrySetResult();
-                _logger.LogDebug(
-                    StompEventIds.StompClient,
-                    $"Listener with Id='{listenerId}' received callback.");
-
-                return Task.CompletedTask;
-            }, listenerState);
-            if (!_listeners.TryAdd(listenerId, listener)) throw new ApplicationException("Error during registration of listener.");
-            _logger.LogDebug(
-                StompEventIds.StompClient,
-                $"Register listener with Id='{listenerId}'.");
-            return listenerId;
-
-        }
-
-        internal bool RemoveListener(string id)
-        {
-            _logger.LogDebug(
-                StompEventIds.StompClient,
-                $"Remove listener with Id='{id}'.");
-            return _listeners.TryRemove(id, out _);
+            using var listenerDisposal = _subscriptionService.AddReplyListener(
+                frame => string.Equals(frame.Command, StompConstants.Commands.Connected,
+                    StringComparison.OrdinalIgnoreCase));
+            Send(connectFrame);
+            return (ConnectedFrame) listenerDisposal.GetResult().GetAwaiter().GetResult();
         }
 
         public async Task<bool> SubscribeAsync(
             string id,
             string queue,
             ISession session,
-            RequestHandlerInternalAsync handler,
+            RequestHandlerInternalAsync clientCallback,
             AcknowledgeMode acknowledgeMode = AcknowledgeMode.Auto)
         {
-            var listener = new Listener(
-                frame => string.Equals(frame.Command, StompConstants.Commands.Message, StringComparison.OrdinalIgnoreCase) &&
-                    frame.HasHeader(StompConstants.Headers.SubscriptionId) &&
-                    frame.GetHeader(StompConstants.Headers.SubscriptionId) == id,
-                HandleMessage,
-                new SubscriptionState(id, session, handler, acknowledgeMode));
-            if (!_listeners.TryAdd(id, listener)) return false;
+            if (!_subscriptionService.AddListener(id, session, GetHandler(clientCallback), acknowledgeMode))
+                return false;
             _logger.LogInformation(
                 StompEventIds.StompClient,
                 $"Subscribe to '{queue}' with name='{id}' on connection '{_connection}'.");
@@ -298,37 +109,35 @@ namespace kirchnerd.StompNet.Internals
 
         }
 
-        private async Task HandleMessage(StompFrame frame, object state)
+        private Func<StompFrame, string, AcknowledgeMode, Task> GetHandler(RequestHandlerInternalAsync clientCallback)
         {
-            var messageFrame = (MessageFrame)frame;
-            var subscription = (SubscriptionState)state;
-
-            _logger.LogTrace(
-                StompEventIds.StompClient,
-                $"Received frame {frame.ToString()} on subscription='{subscription.SubscriptionId}', connection='{_connection}'.");
-
-            // call client handler
-            var response = (SendFrame)await subscription.Handler.Invoke(messageFrame);
-
-            if (response != SendFrame.Void() && frame.HasHeader(StompConstants.Headers.ReplyTo))
+            return async (frame, subscriptionId, acknowledgeMode) =>
             {
-                var replyTo = frame.GetHeader(StompConstants.Headers.ReplyTo);
+                var messageFrame = (MessageFrame)frame;
                 _logger.LogTrace(
                     StompEventIds.StompClient,
-                    $"Sending reply to '{replyTo}' for frame {frame.ToString()} on subscription='{subscription.SubscriptionId}', connection='{_connection}'.");
-                response.WithDestination(replyTo);
-                await SendAsync(response, CancellationToken.None);
-            }
+                    $"Received frame {frame.ToString()} on subscription='{subscriptionId}', connection='{_connection}'.");
 
-            if (subscription.AcknowledgeMode == AcknowledgeMode.Auto)
-            {
-                return;
-            }
+                // call client handler
+                var response = (SendFrame)await clientCallback(messageFrame);
 
-            if (frame.HasHeader(StompConstants.Headers.Ack))
-            {
-                StompFrame ackNack;
+                if (response != SendFrame.Void() && frame.HasHeader(StompConstants.Headers.ReplyTo))
+                {
+                    var replyTo = frame.GetHeader(StompConstants.Headers.ReplyTo);
+                    _logger.LogTrace(
+                        StompEventIds.StompClient,
+                        $"Sending reply to '{replyTo}' for frame {frame.ToString()} on subscription='{subscriptionId}', connection='{_connection}'.");
+                    response.WithDestination(replyTo);
+                    await SendAsync(response, CancellationToken.None);
+                }
+
+                if (acknowledgeMode == AcknowledgeMode.Auto)
+                {
+                    return;
+                }
+
                 var acknowledged = messageFrame.IsAcknowledged();
+
                 // the client want to send ack/nack on his own.
                 // This makes in most cases sense for client-mode since we want to acknowledge
                 // a batch of messages. The implemented client-mode could lead to acknowledged
@@ -338,21 +147,38 @@ namespace kirchnerd.StompNet.Internals
                     return;
                 }
 
-                _logger.LogTrace(
-                    StompEventIds.StompClient,
-                    $"Send acknowledge for {frame.ToString()} on subscription='{subscription.SubscriptionId}', connection='{_connection}'.");
-                var ackId = frame.GetHeader(StompConstants.Headers.Ack);
-                if (acknowledged.Value)
-                {
-                    ackNack = StompFrame.CreateAck(ackId);
-                }
-                else
-                {
-                    ackNack = StompFrame.CreateNack(ackId);
-                }
+                await SendAcknowledge(frame, subscriptionId, acknowledged.Value);
+            };
+        }
 
-                await SendAsync(ackNack, CancellationToken.None);
+        /// <summary>
+        /// Send ack/nack. This frame may be filtered out by the outbox middleware.
+        /// </summary>
+        /// <param name="frame"></param>
+        /// <param name="subscriptionId">The subscription id.</param>
+        /// <param name="acknowledged">
+        /// True when the message should be acknowledged.
+        /// False when the frame should be not acknowledged.
+        /// </param>
+        private async Task SendAcknowledge(StompFrame frame, string subscriptionId, bool acknowledged)
+        {
+            if (!frame.HasHeader(StompConstants.Headers.Ack)) return;
+
+            _logger.LogTrace(
+                StompEventIds.StompClient,
+                $"Send acknowledge for {frame.ToString()} on subscription='{subscriptionId}', connection='{_connection}'.");
+            var ackId = frame.GetHeader(StompConstants.Headers.Ack);
+            StompFrame ackNack;
+            if (acknowledged)
+            {
+                ackNack = StompFrame.CreateAck(ackId);
             }
+            else
+            {
+                ackNack = StompFrame.CreateNack(ackId);
+            }
+
+            await SendAsync(ackNack, CancellationToken.None);
         }
 
         public async Task<bool> UnsubscribeAsync(string id)
@@ -363,7 +189,7 @@ namespace kirchnerd.StompNet.Internals
             var frame = StompFrame.CreateUnsubscribe(id);
             frame.WithReceipt();
             await SendAsync(frame);
-            return RemoveListener(id);
+            return _subscriptionService.RemoveListener(id);
         }
 
         public void Send(StompFrame frame, int timeout = 1000)
@@ -371,7 +197,7 @@ namespace kirchnerd.StompNet.Internals
             SendAsync(frame, timeout).GetAwaiter().GetResult();
         }
 
-        private void Send(StompFrame frame, CancellationToken cancellationToken)
+        public void Send(StompFrame frame, CancellationToken cancellationToken)
         {
             SendAsync(frame, cancellationToken).GetAwaiter().GetResult();
         }
@@ -382,30 +208,6 @@ namespace kirchnerd.StompNet.Internals
             cts.CancelAfter(timeout);
 
             return SendAsync(frame, cts.Token);
-        }
-
-        private async Task SendAsync(StompFrame frame, CancellationToken cancellationToken)
-        {
-            var receiptTask = Task.CompletedTask;
-            if (frame.HasHeader(StompConstants.Headers.Receipt))
-            {
-                receiptTask = _receiptTimer.WaitForReceiptAsync(frame.GetHeader(StompConstants.Headers.Receipt));
-            }
-
-            await _outbox.EnqueueAsync(frame, cancellationToken);
-            await Task.WhenAny(
-                cancellationToken.AsTask(),
-                receiptTask);
-
-            if (frame.HasHeader(StompConstants.Headers.Receipt))
-            {
-                _receiptTimer.TryRemove(frame.GetHeader(StompConstants.Headers.Receipt));
-            }
-
-            if (!receiptTask.IsCompleted)
-            {
-                throw new TimeoutException();
-            }
         }
 
         public StompFrame Request(StompFrame frame, int timespan = 1000)
@@ -441,16 +243,23 @@ namespace kirchnerd.StompNet.Internals
                 throw new StompException("An explicit reply-to header is mandatory.");
             }
 
-            var listenerId = AddListener(
-                receivedFrame => string.Equals(receivedFrame.Command, StompConstants.Commands.Message,
-                    StringComparison.OrdinalIgnoreCase) &&
+            using var listenerDisposal = _subscriptionService.AddReplyListener(
+                receivedFrame =>
+                    string.Equals(
+                        receivedFrame.Command,
+                        StompConstants.Commands.Message,
+                        StringComparison.OrdinalIgnoreCase) &&
                     receivedFrame.HasHeader(StompConstants.Headers.SubscriptionId) &&
                     string.Equals(
                         receivedFrame.GetHeader(StompConstants.Headers.SubscriptionId),
                         sendFrame.GetHeader(StompConstants.Headers.ReplyTo)));
-            if (listenerId is null) throw new ApplicationException("Error while registering a frame listener.");
             await SendAsync(sendFrame, cancellationToken);
-            return await ListenAndRemoveAsync(listenerId);
+            return await listenerDisposal.GetResult();
+        }
+
+        private Task SendAsync(StompFrame frame, CancellationToken cancellationToken)
+        {
+            return _sendPipeline.ExecuteAsync(new OutboxContext(frame, cancellationToken));
         }
 
         /// <summary>
@@ -459,6 +268,79 @@ namespace kirchnerd.StompNet.Internals
         /// </summary>
         private void StartUpStompOutbox()
         {
+            var pipeline = new Pipeline<OutboxContext>();
+            // log frames and errors
+            pipeline.Use(async (ctx, next) =>
+            {
+                try
+                {
+                    _logger.LogDebug(
+                        StompEventIds.Outbox,
+                        $"Received frame {ctx.Frame.ToString()}.");
+                    await next();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(
+                        StompEventIds.Outbox,
+                        ex.ToStringDemystified());
+                }
+            });
+
+            // This middleware is invoked before a frame is transmitted over the wire and
+            // sorts out ack/nack's which are redundant.
+            pipeline.Use(async (ctx, next) =>
+            {
+                if (!string.Equals(ctx.Frame.Command, StompConstants.Commands.Ack, StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(ctx.Frame.Command, StompConstants.Commands.Nack, StringComparison.OrdinalIgnoreCase))
+                {
+                    await next();
+                }
+                else
+                {
+                    if (_acknowledgeService.IsAcknowledgeRequired(ctx.Frame.GetHeader(StompConstants.Headers.AckId)))
+                    {
+                        await next();
+                    }
+                }
+            });
+
+            // update outgoing heartbeat
+            pipeline.Use(async (ctx, next) =>
+            {
+                await next();
+                // After Sent
+                _logger.LogTrace(
+                    StompEventIds.Outbox,
+                    $"Update outgoing heartbeat.");
+                _heartbeatOut.Update();
+            });
+
+            pipeline.Run(async ctx =>
+            {
+                var receiptTask = Task.CompletedTask;
+                if (ctx.Frame.HasHeader(StompConstants.Headers.Receipt))
+                {
+                    receiptTask = _receiptService.WaitForReceiptAsync(ctx.Frame.GetHeader(StompConstants.Headers.Receipt));
+                }
+
+                await _outbox.EnqueueAsync(ctx.Frame, ctx.CancellationToken);
+                await Task.WhenAny(
+                    ctx.CancellationToken.AsTask(),
+                    receiptTask);
+
+                if (ctx.Frame.HasHeader(StompConstants.Headers.Receipt))
+                {
+                    _receiptService.TryRemove(ctx.Frame.GetHeader(StompConstants.Headers.Receipt));
+                }
+
+                if (!receiptTask.IsCompleted)
+                {
+                    throw new TimeoutException();
+                }
+            });
+
+            _sendPipeline = pipeline;
             _outbox = new StompOutbox(
                 _connection,
                 _logger,
@@ -466,8 +348,6 @@ namespace kirchnerd.StompNet.Internals
                 _writeBytes,
                 _cancelSource.Token);
             _outbox.Error += OnError;
-            _outbox.Sending += Sending;
-            _outbox.Sent += Sent;
             _outboxThread = new Thread(_outbox.Run)
             {
                 Name = $"STOMP Outbox Agent @{_connection}",
@@ -485,14 +365,81 @@ namespace kirchnerd.StompNet.Internals
         /// </summary>
         private void StartUpStompInbox()
         {
+            var pipeline = new Pipeline<InboxContext>();
+            // log frames and errors
+            pipeline.Use(async (ctx, next) =>
+            {
+                try
+                {
+                    _logger.LogDebug(
+                        StompEventIds.Inbox,
+                        $"Received frame {ctx.Frame.ToString()}.");
+                    await next();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(
+                        StompEventIds.Inbox,
+                        ex.ToStringDemystified());
+                }
+            });
+            // update heartbeat
+            pipeline.Use((ctx, next) =>
+            {
+                _logger.LogTrace(
+                    StompEventIds.StompClient,
+                    $"Update incoming heartbeat.");
+                _heartbeatIn.Update();
+                return next();
+            });
+            // handle incoming frames
+            pipeline.Run(ctx =>
+            {
+                var frame = ctx.Frame;
+                switch (frame.Command)
+                {
+                    case var value when string.Equals(value, StompConstants.Commands.Receipt, StringComparison.OrdinalIgnoreCase):
+                        var receiptId = frame.GetHeader(StompConstants.Headers.ReceiptId);
+                        _receiptService.Receive(receiptId);
+                        break;
+                    case var value when string.Equals(value, StompConstants.Commands.Connected, StringComparison.OrdinalIgnoreCase):
+                        _subscriptionService.NotifyListeners(frame);
+                        break;
+                    case var value when string.Equals(value, StompConstants.Commands.Message, StringComparison.OrdinalIgnoreCase):
+                        var subscriptionId = frame.GetHeader(StompConstants.Headers.SubscriptionId);
+                        if (frame.HasHeader(StompConstants.Headers.Ack))
+                        {
+                            _logger.LogDebug(
+                                StompEventIds.Inbox,
+                                $"Create acknowledgment for {frame.ToString()} for subscription '{subscriptionId}'.");
+                            var ackId = frame.GetHeader(StompConstants.Headers.Ack);
+                            // track acknowledge id from the server (broker) that must be handled.
+                            _acknowledgeService.Register(ackId, subscriptionId, frame.GetHeader<long>(StompConstants.Headers.Internal.Received));
+                        }
+
+                        _subscriptionService.NotifyListeners(frame);
+                        break;
+                    case var value when string.Equals(value, StompConstants.Commands.Error, StringComparison.OrdinalIgnoreCase):
+                        OnError(new StompFrameException(frame, frame.GetBody()));
+                        break;
+                    default:
+                        _logger.LogWarning(
+                            StompEventIds.Inbox,
+                            $"Unknown frame: {frame.ToString()}");
+                        break;
+                }
+
+                return Task.CompletedTask;
+            });
+
             _inbox = new StompInbox(
                 _logger,
                 _connection,
                 new StompUnmarshaller(_logger),
+                pipeline,
                 _readBytes,
                 _cancelSource.Token);
             _inbox.Error += OnError;
-            _inbox.FrameReceived += OnFrameReceived;
             _inboxThread = new Thread(_inbox.Run)
             {
                 Name = $"STOMP Inbox Agent @{_connection}",
@@ -511,12 +458,13 @@ namespace kirchnerd.StompNet.Internals
             {
                 _heartbeatIn.Dispose();
                 _heartbeatOut.Dispose();
-                _receiptTimer.Dispose();
+                _acknowledgeService.Dispose();
+                _subscriptionService.Dispose();
+                _receiptService.Dispose();
 
                 if (_inboxThread.IsAlive)
                 {
                     _inbox.Error -= OnError;
-                    _inbox.FrameReceived -= OnFrameReceived;
                     _inbox.Stop();
                     _cancelSource.Cancel();
                     _inboxThread.Join();
@@ -524,8 +472,6 @@ namespace kirchnerd.StompNet.Internals
 
                 if (_outboxThread.IsAlive)
                 {
-                    _outbox.Sending -= Sending;
-                    _outbox.Sent -= Sent;
                     _outbox.Error -= Error;
                     _outbox.Stop();
                     _cancelSource.Cancel();
@@ -550,73 +496,6 @@ namespace kirchnerd.StompNet.Internals
         internal void SetHeartbeatIn(int interval)
         {
             _heartbeatIn.Start(interval);
-        }
-
-        private class Acknowledgement
-        {
-            public Acknowledgement(string subscriptionId, long receivedTicks)
-            {
-                Timestamp = receivedTicks;
-                SubscriptionId = subscriptionId;
-            }
-
-            public string SubscriptionId { get; }
-
-            public long Timestamp { get; }
-        }
-
-        private class Listener
-        {
-            public Listener(
-                Predicate<StompFrame> predicate,
-                Func<StompFrame, object, Task> handler,
-                object listenerState)
-            {
-                Check = predicate ?? throw new ArgumentNullException(nameof(predicate));
-                Handler = handler ?? throw new ArgumentNullException(nameof(handler));
-                State = listenerState;
-            }
-
-            public Predicate<StompFrame> Check { get; }
-
-            public Func<StompFrame, object, Task> Handler { get; }
-
-            public object State { get; }
-        }
-
-        private class SubscriptionState
-        {
-            public SubscriptionState(
-                string subscriptionId,
-                ISession session,
-                RequestHandlerInternalAsync handler,
-                AcknowledgeMode acknowledgeMode = AcknowledgeMode.Auto)
-            {
-                SubscriptionId = subscriptionId;
-                Session = session ?? throw new ArgumentNullException(nameof(session));
-                Handler = handler ?? throw new ArgumentNullException(nameof(handler));
-                AcknowledgeMode = acknowledgeMode;
-            }
-
-            public string SubscriptionId { get; }
-
-            public ISession Session { get; }
-
-            public RequestHandlerInternalAsync Handler { get; }
-
-            public AcknowledgeMode AcknowledgeMode { get; }
-
-        }
-
-        private class ListenerState
-        {
-            public int Set;
-
-            public readonly ManualResetEventSlim ManualResetEvent = new();
-
-            public readonly TaskCompletionSource TaskCompletionSource = new();
-
-            public StompFrame Result { get; set; } = null!;
         }
     }
 }

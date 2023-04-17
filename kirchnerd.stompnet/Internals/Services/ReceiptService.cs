@@ -3,12 +3,12 @@ using System.Collections.Concurrent;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace kirchnerd.StompNet.Internals
+namespace kirchnerd.StompNet.Internals.Services
 {
     /// <summary>
-    /// Handles the cumulative acknowledgment of recipts.
+    /// Handles the cumulative acknowledgment of receipts.
     /// </summary>
-    internal sealed class ReceiptTimer : IDisposable
+    internal sealed class ReceiptService : IReceiptService
     {
         private readonly object _sync = new();
         private readonly ConcurrentDictionary<string, Receipt> _receipts = new();
@@ -17,7 +17,7 @@ namespace kirchnerd.StompNet.Internals
         private long _lastReceipt;
         private bool _disposed;
 
-        public ReceiptTimer()
+        public ReceiptService()
         {
             _timer = new Timer(Run);
             _timer.Change(0, 100);
@@ -55,7 +55,7 @@ namespace kirchnerd.StompNet.Internals
         /// Waits until the given receipt is received.
         /// </summary>
         /// <param name="receiptId">The receipt id.</param>
-        internal Task WaitForReceiptAsync(string receiptId)
+        public Task WaitForReceiptAsync(string receiptId)
         {
             var receipt = new Receipt();
             _receipts.TryAdd(receiptId, receipt);
@@ -68,7 +68,7 @@ namespace kirchnerd.StompNet.Internals
         /// receipts are cumulative. All receipts sent before the timestamp are automatically confirmed.
         /// </summary>
         /// <param name="receiptId">The received receipt.</param>
-        internal void Receive(string receiptId)
+        public void Receive(string receiptId)
         {
             if (!_receipts.TryGetValue(receiptId, out var receipt)) return;
             lock (_sync)
@@ -80,7 +80,7 @@ namespace kirchnerd.StompNet.Internals
             }
         }
 
-        internal void TryRemove(string receiptId)
+        public void TryRemove(string receiptId)
         {
             _receipts.TryRemove(receiptId, out _);
         }
@@ -110,17 +110,10 @@ namespace kirchnerd.StompNet.Internals
             _disposed = true;
         }
 
-        // ~ReceiptTimer()
-        // {
-        //     // Do not change this code. Put cleanup code in 'Dispose(bool disposing)' method
-        //     Dispose(disposing: false);
-        // }
-
         public void Dispose()
         {
             // Do not change this code. Put cleanup code in 'Dispose(bool disposing)' method
             Dispose(disposing: true);
-            GC.SuppressFinalize(this);
         }
     }
 }
