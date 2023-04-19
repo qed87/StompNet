@@ -861,6 +861,7 @@ public class SystemTests
         requestFrame.SetBody("3 * 3", "text/plain");
         requestFrame.ReplyTo("/temp-queue/answer");
         var reply = await session.RequestAsync($"/queue/{nameof(CheckRequestAndReply)}", requestFrame, 1000);
-        Assert.AreEqual("4", reply.GetBody());
+        var answer = reply.GetBody();
+        Assert.AreEqual("4", answer);
     }
 }

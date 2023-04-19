@@ -57,7 +57,7 @@ namespace kirchnerd.StompNet.Internals.Services
             Interlocked.Exchange(ref _lastFrameInTicks, DateTimeOffset.UtcNow.Ticks);
         }
 
-        protected virtual void Dispose(bool disposing)
+        protected void Dispose(bool disposing)
         {
             if (Disposed) return;
             if (disposing)

@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading;
@@ -48,7 +47,6 @@ namespace kirchnerd.StompNet.Internals
         private Thread _outboxThread = null!;
         private StompInbox _inbox = null!;
         private Thread _inboxThread = null!;
-        private Pipeline<OutboxContext> _sendPipeline = null!;
 
         public StompClient(
             string connection,
@@ -257,9 +255,28 @@ namespace kirchnerd.StompNet.Internals
             return await listenerDisposal.GetResult();
         }
 
-        private Task SendAsync(StompFrame frame, CancellationToken cancellationToken)
+        private async Task SendAsync(StompFrame frame, CancellationToken cancellationToken)
         {
-            return _sendPipeline.ExecuteAsync(new OutboxContext(frame, cancellationToken));
+            var receiptTask = Task.CompletedTask;
+            if (frame.HasHeader(StompConstants.Headers.Receipt))
+            {
+                receiptTask = _receiptService.WaitForReceiptAsync(frame.GetHeader(StompConstants.Headers.Receipt));
+            }
+
+            await _outbox.EnqueueAsync(frame, cancellationToken);
+            await Task.WhenAny(
+                cancellationToken.AsTask(),
+                receiptTask);
+
+            if (frame.HasHeader(StompConstants.Headers.Receipt))
+            {
+                _receiptService.TryRemove(frame.GetHeader(StompConstants.Headers.Receipt));
+            }
+
+            if (!receiptTask.IsCompleted)
+            {
+                throw new TimeoutException();
+            }
         }
 
         /// <summary>
@@ -291,18 +308,19 @@ namespace kirchnerd.StompNet.Internals
             // sorts out ack/nack's which are redundant.
             pipeline.Use(async (ctx, next) =>
             {
-                if (!string.Equals(ctx.Frame.Command, StompConstants.Commands.Ack, StringComparison.OrdinalIgnoreCase) &&
-                    !string.Equals(ctx.Frame.Command, StompConstants.Commands.Nack, StringComparison.OrdinalIgnoreCase))
+                if (ctx.Frame is not IAcknowledge acknowledge)
                 {
                     await next();
+                    return;
                 }
-                else
-                {
-                    if (_acknowledgeService.IsAcknowledgeRequired(ctx.Frame.GetHeader(StompConstants.Headers.AckId)))
-                    {
-                        await next();
-                    }
-                }
+
+                if (!_acknowledgeService.IsAcknowledgeRequired(acknowledge.Id, out var subscriptionId, out var timestamp))
+                    return;
+
+                await next();
+
+                if (subscriptionId is null || timestamp is null) return;
+                _acknowledgeService.Update(subscriptionId, timestamp.Value);
             });
 
             // update outgoing heartbeat
@@ -316,36 +334,17 @@ namespace kirchnerd.StompNet.Internals
                 _heartbeatOut.Update();
             });
 
-            pipeline.Run(async ctx =>
+            pipeline.Run(ctx =>
             {
-                var receiptTask = Task.CompletedTask;
-                if (ctx.Frame.HasHeader(StompConstants.Headers.Receipt))
-                {
-                    receiptTask = _receiptService.WaitForReceiptAsync(ctx.Frame.GetHeader(StompConstants.Headers.Receipt));
-                }
-
-                await _outbox.EnqueueAsync(ctx.Frame, ctx.CancellationToken);
-                await Task.WhenAny(
-                    ctx.CancellationToken.AsTask(),
-                    receiptTask);
-
-                if (ctx.Frame.HasHeader(StompConstants.Headers.Receipt))
-                {
-                    _receiptService.TryRemove(ctx.Frame.GetHeader(StompConstants.Headers.Receipt));
-                }
-
-                if (!receiptTask.IsCompleted)
-                {
-                    throw new TimeoutException();
-                }
+                _writeBytes!(ctx.FrameBytes);
+                return Task.CompletedTask;
             });
 
-            _sendPipeline = pipeline;
             _outbox = new StompOutbox(
                 _connection,
                 _logger,
                 new MarshallerProvider(),
-                _writeBytes,
+                pipeline,
                 _cancelSource.Token);
             _outbox.Error += OnError;
             _outboxThread = new Thread(_outbox.Run)

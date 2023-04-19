@@ -40,7 +40,7 @@ public class SubscriptionService : ISubscriptionService
                 continue;
             }
 
-            handlerTasks.Add(listener.Handle(frame));
+            handlerTasks.Add(Task.Run(() => listener.Handle(frame)));
         }
 
         await Task.WhenAll(handlerTasks);
@@ -80,7 +80,6 @@ public class SubscriptionService : ISubscriptionService
 
     public void Dispose()
     {
-        throw new NotImplementedException();
     }
 
     private abstract class Listener

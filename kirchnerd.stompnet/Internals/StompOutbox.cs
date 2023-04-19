@@ -5,6 +5,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using kirchnerd.StompNet.Exceptions;
 using kirchnerd.StompNet.Internals.Interfaces;
+using kirchnerd.StompNet.Internals.Middleware;
+using kirchnerd.StompNet.Internals.Services;
 using kirchnerd.StompNet.Internals.Transport;
 using kirchnerd.StompNet.Internals.Transport.Frames;
 using Microsoft.Extensions.Logging;
@@ -45,17 +47,17 @@ namespace kirchnerd.StompNet.Internals
 
         private readonly IMarshallerProvider _provider;
 
-        private FrameBytesWrite? _writeBuffer;
+        private Pipeline<OutboxContext> _writePipeline;
 
         public StompOutbox(string connectionString,
             ILogger<StompDriver> logger,
             IMarshallerProvider provider,
-            FrameBytesWrite writeBuffer,
+            Pipeline<OutboxContext> writePipeline,
             CancellationToken cancelToken)
         {
             _cancelToken = cancelToken;
             _connectionString = connectionString;
-            _writeBuffer = writeBuffer;
+            _writePipeline = writePipeline;
             _provider = provider;
             _logger = logger;
         }
@@ -171,7 +173,7 @@ namespace kirchnerd.StompNet.Internals
                         cancellationToken.ThrowIfCancellationRequested();
 
                         // send frame on wire.
-                        _writeBuffer!(frameBytes);
+                        _writePipeline.ExecuteAsync(new OutboxContext(frame, frameBytes)).GetAwaiter().GetResult();
 
                         // inform sender that frame is sent.
                         onCompleted();
@@ -221,8 +223,6 @@ namespace kirchnerd.StompNet.Internals
             }
 
             // release unmanaged resources here
-            _writeBuffer = null;
-
             _dispose = true;
         }
         #endregion IDisposable Support

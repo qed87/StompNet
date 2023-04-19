@@ -35,5 +35,6 @@ namespace kirchnerd.StompNet
 
         public static readonly EventId Unmarshaller = new(13, nameof(Unmarshaller));
 
+        public static readonly EventId AcknowledgeService = new(14, nameof(AcknowledgeService));
     }
 }

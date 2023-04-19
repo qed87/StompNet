@@ -7,8 +7,6 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "kirchnerd.stompnet", "kirch
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "kirchnerd.stompnet.Tests", "kirchnerd.stompnet.Tests\kirchnerd.stompnet.Tests.csproj", "{8CF35474-6332-4F65-9956-ECC82D6EF8B4}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "kirchnerd.stompnet.TestClient", "kirchnerd.stompnet.TestClient\kirchnerd.stompnet.TestClient.csproj", "{2DAAB98E-1738-45A3-8109-A968F5EED2C1}"
-EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -23,10 +21,6 @@ Global
 		{8CF35474-6332-4F65-9956-ECC82D6EF8B4}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{8CF35474-6332-4F65-9956-ECC82D6EF8B4}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{8CF35474-6332-4F65-9956-ECC82D6EF8B4}.Release|Any CPU.Build.0 = Release|Any CPU
-		{2DAAB98E-1738-45A3-8109-A968F5EED2C1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{2DAAB98E-1738-45A3-8109-A968F5EED2C1}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{2DAAB98E-1738-45A3-8109-A968F5EED2C1}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{2DAAB98E-1738-45A3-8109-A968F5EED2C1}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
