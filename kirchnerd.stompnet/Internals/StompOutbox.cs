@@ -5,42 +5,14 @@ using System.Threading;
 using System.Threading.Tasks;
 using kirchnerd.StompNet.Exceptions;
 using kirchnerd.StompNet.Internals.Interfaces;
+using kirchnerd.StompNet.Internals.Middleware;
+using kirchnerd.StompNet.Internals.Services;
 using kirchnerd.StompNet.Internals.Transport;
 using kirchnerd.StompNet.Internals.Transport.Frames;
 using Microsoft.Extensions.Logging;
 
 namespace kirchnerd.StompNet.Internals
 {
-    internal class SendingContext
-    {
-        public SendingContext(StompFrame frame)
-        {
-            Frame = frame;
-        }
-
-        public StompFrame Frame { get; }
-
-        public bool IsCancelled { get; private set; }
-
-        public void Cancel()
-        {
-            IsCancelled = true;
-        }
-    }
-
-    internal class SentContext
-    {
-        public SentContext(StompFrame frame)
-        {
-            Frame = frame;
-        }
-
-        public StompFrame Frame { get; }
-    }
-
-    internal delegate void Sending(SendingContext ctx);
-    internal delegate void Sent(SentContext ctx);
-
     /// <summary>
     /// This class represents the outbox of the driver component and holds a queue of messages destined to the broker.
     /// </summary>
@@ -55,21 +27,6 @@ namespace kirchnerd.StompNet.Internals
         private void OnError(Exception exception)
         {
             Error?.Invoke(exception);
-        }
-
-        public event Sending? Sending;
-
-        private bool OnSending(StompFrame frame)
-        {
-            var ctx = new SendingContext(frame);
-            Sending?.Invoke(ctx);
-            return !ctx.IsCancelled;
-        }
-
-        public event Sent? Sent;
-        private void OnSent(StompFrame frame)
-        {
-            Sent?.Invoke(new SentContext(frame));
         }
 
         private const int MaxMessageSize = 125829120;
@@ -90,17 +47,17 @@ namespace kirchnerd.StompNet.Internals
 
         private readonly IMarshallerProvider _provider;
 
-        private FrameBytesWrite? _writeBuffer;
+        private Pipeline<OutboxContext> _writePipeline;
 
         public StompOutbox(string connectionString,
             ILogger<StompDriver> logger,
             IMarshallerProvider provider,
-            FrameBytesWrite writeBuffer,
+            Pipeline<OutboxContext> writePipeline,
             CancellationToken cancelToken)
         {
             _cancelToken = cancelToken;
             _connectionString = connectionString;
-            _writeBuffer = writeBuffer;
+            _writePipeline = writePipeline;
             _provider = provider;
             _logger = logger;
         }
@@ -151,15 +108,19 @@ namespace kirchnerd.StompNet.Internals
                         return;
                     }
 
-                    (StompFrame Frame, CancellationToken CancellationToken, Action OnCompleted, Action<Exception> OnError) entry;
+                    // (StompFrame Frame, CancellationToken CancellationToken, Action OnCompleted, Action<Exception> OnError) entry;
                     int priority;
 
                     // Critical section: Enqueue() and mrs.Set() must be executed mutually exclusive to Dequeue() and mrs.Reset().
-                    // EXMPL: Otherwise it could happen that an enqueued item is not processed since mrs.Reset() is called after mrs.Set().
+                    // EXAMPLE: Otherwise it could happen that an enqueued item is not processed since mrs.Reset() is called after mrs.Set().
+                    StompFrame frame;
+                    CancellationToken cancellationToken;
+                    Action onCompleted;
+                    Action<Exception> onError;
                     lock (_sync)
                     {
                         // try to get the next frame
-                        if (!_queue.TryDequeue(out entry, out priority))
+                        if (!_queue.TryDequeue(out var entry, out priority))
                         {
                             // If no frames are available reset the manual reset event.
                             // This has the consequence that the next call of wait is blocked,
@@ -167,72 +128,60 @@ namespace kirchnerd.StompNet.Internals
                             _manualResetEventSlim.Reset();
                             continue;
                         }
+
                         // next frame for processing available...
+                        (frame, cancellationToken, onCompleted, onError) = entry;
                     }
 
-                    if (entry.CancellationToken.IsCancellationRequested)
+                    if (cancellationToken.IsCancellationRequested)
                     {
-                        entry.OnError(new TimeoutException());
+                        onError(new TimeoutException());
                         continue;
                     }
 
-                    if (entry.Frame.Type == FrameType.Server)
+                    if (frame.Type == FrameType.Server)
                     {
                         // if the frame is not destined for the broker something went totally wrong...
                         _logger.LogError(
                             StompEventIds.Outbox,
-                            $"Frame intended for the client was mistakenly routed to the STOMP Outbox Agent on '{_connectionString}':\r\n\r\n{entry.Frame}");
+                            $"Frame intended for the client was mistakenly routed to the STOMP Outbox Agent on '{_connectionString}':\r\n\r\n{frame}");
                         // inform the sender about this mistake.
-                        entry.OnError(new StompFrameException(entry.Frame, "Frame is not intended for stomp server; frame discarded from outbox!"));
+                        onError(new StompFrameException(frame, "Frame is not intended for stomp server; frame discarded from outbox!"));
                         continue;
                     }
 
                     // going to send client frames to broker...
                     _logger.LogDebug(
                         StompEventIds.Outbox,
-                        $"Send frame with Priority={priority} to STOMP-Server on '{_connectionString}':\r\n\r\n{entry.Frame}");
+                        $"Send frame with Priority={priority} to STOMP-Server on '{_connectionString}':\r\n\r\n{frame}");
 
-                    entry.Frame.MarkSend();
-                    var marshaller = _provider.Get(entry.Frame, _logger);
-                    var frameBytes = marshaller.Marshal(entry.Frame);
+                    frame.MarkSend();
+                    var marshaller = _provider.Get(frame, _logger);
+                    var frameBytes = marshaller.Marshal(frame);
                     if (frameBytes.Length > MaxMessageSize)
                     {
                         _logger.LogCritical(
                             StompEventIds.Outbox,
-                            $"Message is too big and hence disposed on '{_connectionString}':\r\n\r\n{entry.Frame.ToString(withBody: true)}");
+                            $"Message is too big and hence disposed on '{_connectionString}':\r\n\r\n{frame.ToString(withBody: true)}");
                         // inform sender about message size violation.
-                        entry.OnError(new StompFrameException(entry.Frame, "Frame exceeded max message size; frame disposed!"));
+                        onError(new StompFrameException(frame, "Frame exceeded max message size; frame disposed!"));
                         continue;
                     }
 
                     try
                     {
-                        entry.CancellationToken.ThrowIfCancellationRequested();
-
-                        // notify clients and skip cumulative acknowledgments
-                        if (!OnSending(entry.Frame))
-                        {
-                            _logger.LogTrace(
-                                StompEventIds.Outbox,
-                                $"Frame with Priority={priority} is skipped for '{_connectionString}':\r\n\r\n{entry.Frame.ToString(withBody: true)}");
-                            continue;
-                        }
-
-                        entry.CancellationToken.ThrowIfCancellationRequested();
+                        cancellationToken.ThrowIfCancellationRequested();
 
                         // send frame on wire.
-                        _writeBuffer!(frameBytes);
-
-                        // notify clients about sent frame
-                        OnSent(entry.Frame);
+                        _writePipeline.ExecuteAsync(new OutboxContext(frame, frameBytes)).GetAwaiter().GetResult();
 
                         // inform sender that frame is sent.
-                        entry.OnCompleted();
+                        onCompleted();
                     }
                     catch (Exception ex)
                     {
                         // inform sender about error.
-                        entry.OnError(ex);
+                        onError(ex);
                     }
                 }
                 while (_isRunning);
@@ -274,8 +223,6 @@ namespace kirchnerd.StompNet.Internals
             }
 
             // release unmanaged resources here
-            _writeBuffer = null;
-
             _dispose = true;
         }
         #endregion IDisposable Support

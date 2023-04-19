@@ -1,7 +1,7 @@
 ﻿#pragma warning disable CS0414
 namespace kirchnerd.StompNet.Internals
 {
-    internal class StompConstants
+    internal static class StompConstants
     {
         /// <summary>
         /// Common stomp commands.

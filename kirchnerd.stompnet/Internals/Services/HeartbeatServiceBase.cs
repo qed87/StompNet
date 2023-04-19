@@ -1,26 +1,24 @@
 ﻿using System;
 using System.Threading;
 
-namespace kirchnerd.StompNet.Internals
+namespace kirchnerd.StompNet.Internals.Services
 {
     /// <summary>
     /// Timer which checks whether heartbeats where received in time or
     /// initiate outgoing heartbeats.
     /// </summary>
-    internal sealed class HeartbeatTimer : IDisposable
+    internal abstract class HeartbeatServiceBase : IHeartbeatService
     {
         private const int Infinite = -1;
 
         private long? _lastHeartbeat = DateTimeOffset.UtcNow.Ticks;
         private volatile int _isRunning;
         private readonly Timer _timer;
-        private readonly Action _onElapsed;
         private long _lastFrameInTicks;
-        private bool _disposed;
+        protected bool Disposed;
 
-        public HeartbeatTimer(Action onElapsed)
+        protected HeartbeatServiceBase()
         {
-            _onElapsed = onElapsed;
             _timer = new Timer(Run);
         }
 
@@ -45,27 +43,29 @@ namespace kirchnerd.StompNet.Internals
             var delta = value - _lastHeartbeat;
             if (delta < 0)
             {
-                _onElapsed();
+                OnElapsed();
             }
 
             _lastHeartbeat = DateTimeOffset.UtcNow.Ticks;
             Interlocked.Exchange(ref _isRunning, 0);
         }
 
+        protected abstract void OnElapsed();
+
         public void Update()
         {
             Interlocked.Exchange(ref _lastFrameInTicks, DateTimeOffset.UtcNow.Ticks);
         }
 
-        private void Dispose(bool disposing)
+        protected void Dispose(bool disposing)
         {
-            if (_disposed) return;
+            if (Disposed) return;
             if (disposing)
             {
                 _timer.Dispose();
             }
 
-            _disposed = true;
+            Disposed = true;
         }
 
         public void Dispose()
