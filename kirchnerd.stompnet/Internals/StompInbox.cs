@@ -2,6 +2,7 @@
 using System.Threading;
 using kirchnerd.StompNet.Exceptions;
 using kirchnerd.StompNet.Internals.Interfaces;
+using kirchnerd.StompNet.Internals.Middleware;
 using kirchnerd.StompNet.Internals.Transport;
 using kirchnerd.StompNet.Internals.Transport.Frames;
 using Microsoft.Extensions.Logging;
@@ -15,18 +16,15 @@ namespace kirchnerd.StompNet.Internals
     /// <remarks>
     /// Only one thread may read the socket connection at a time but a simultaneously write is allowed.
     /// </remarks>
-    internal class StompInbox : IDisposable
+    internal sealed class StompInbox : IDisposable
     {
+        private readonly Pipeline<InboxContext> _pipeline;
+
         public event ErrorHandler? Error;
-        protected void OnError(Exception exception)
+
+        private void OnError(Exception exception)
         {
             Error?.Invoke(exception);
-        }
-
-        public event FrameHandlerInternal? FrameReceived;
-        protected void OnFrameReceived(StompFrame frame)
-        {
-            FrameReceived?.Invoke(frame);
         }
 
         private readonly CancellationToken _cancelToken;
@@ -44,6 +42,7 @@ namespace kirchnerd.StompNet.Internals
         public StompInbox(ILogger<StompDriver> logger,
             string connectionString,
             IUnmarshaller unmarshaller,
+            Pipeline<InboxContext> pipeline,
             FrameBytesRead readByte,
             CancellationToken cancelToken)
         {
@@ -52,6 +51,7 @@ namespace kirchnerd.StompNet.Internals
             _logger = logger;
             _readByte = readByte;
             _unmarshaller = unmarshaller;
+            _pipeline = pipeline;
         }
 
         /// <summary>
@@ -81,7 +81,9 @@ namespace kirchnerd.StompNet.Internals
                             StompEventIds.Inbox,
                             $"Forward Frame to StompClient on '{_connectionString}'::\r\n\r\n{frame}");
 
-                        OnFrameReceived(frame);
+                        _pipeline.ExecuteAsync(new InboxContext(frame))
+                            .GetAwaiter()
+                            .GetResult();
                     }
                     catch (Exception ex)
                     {
@@ -98,6 +100,7 @@ namespace kirchnerd.StompNet.Internals
                     StompEventIds.Inbox,
                     $"Error during read on '{_connectionString}':':\r\n\r\n{ex}");
                 Stop();
+                
                 // inbox agent can only be closed on the hard way since thread interrupts are ignored...
                 OnError(ex);
             }
@@ -114,13 +117,12 @@ namespace kirchnerd.StompNet.Internals
         #region IDisposable Support
 
         private bool _dispose = false;
-
         public void Dispose()
         {
             Dispose(true);
         }
 
-        protected virtual void Dispose(bool disposing)
+        private void Dispose(bool disposing)
         {
             if (_dispose) return;
             if (disposing)
