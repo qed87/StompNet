@@ -3,6 +3,7 @@ using System.Threading.Tasks;
 using kirchnerd.StompNet.Interfaces;
 using kirchnerd.StompNet.Internals.Interfaces;
 using kirchnerd.StompNet.Internals.Transport.Frames;
+using kirchnerd.StompNet.Validators;
 
 namespace kirchnerd.StompNet.Internals
 {
@@ -13,15 +14,21 @@ namespace kirchnerd.StompNet.Internals
     {
         private readonly ISession _session;
         private readonly StompClient _stompClient;
+        private readonly IServerSpecificValidator _frameValidator;
+        private readonly IReplyHeaderProvider _replyHeaderProvider;
         private readonly string _destination;
 
         public StompDestination(
             ISession session,
             StompClient stompClient,
+            IServerSpecificValidator frameValidator,
+            IReplyHeaderProvider replyHeaderProvider,
             string destination)
         {
             _session = session;
             _stompClient = stompClient;
+            _frameValidator = frameValidator;
+            _replyHeaderProvider = replyHeaderProvider;
             _destination = destination;
         }
 
@@ -29,7 +36,8 @@ namespace kirchnerd.StompNet.Internals
         public async Task<MessageFrame> RequestAsync(SendFrame frame, int timeout)
         {
             frame.WithDestination(_destination);
-            var response = await _stompClient.RequestAsync(frame, timeout);
+            _frameValidator.Validate(new ValidationContext(frame, isRequest: true));
+            var response = await _stompClient.RequestAsync(frame, _replyHeaderProvider.GetReplyHeader, timeout);
             return (MessageFrame)response;
         }
 
@@ -37,6 +45,7 @@ namespace kirchnerd.StompNet.Internals
         public void Send(SendFrame frame, int timeout = 1000)
         {
             frame.WithDestination(_destination);
+            _frameValidator.Validate(new ValidationContext(frame, isRequest: false));
             _stompClient.Send(frame, timeout);
         }
 
@@ -44,6 +53,7 @@ namespace kirchnerd.StompNet.Internals
         public Task SendAsync(SendFrame frame, int timeout = 1000)
         {
             frame.WithDestination(_destination);
+            _frameValidator.Validate(new ValidationContext(frame, isRequest: false));
             return _stompClient.SendAsync(frame, timeout);
         }
 

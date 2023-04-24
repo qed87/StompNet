@@ -95,10 +95,12 @@ namespace kirchnerd.StompNet
                             if (connectedFrame is null) throw new StompException("Connection failed.");
                             ConfigureHeartbeat(connectedFrame, cx, cy);
 
+                            var server = connectedFrame.GetHeader("server");
                             _session = new StompSession(
                                 _logger,
                                 this,
                                 _stompClient,
+                                server,
                                 connectedFrame.GetHeader("session"));
 
                             _state = ConnectionState.Established;

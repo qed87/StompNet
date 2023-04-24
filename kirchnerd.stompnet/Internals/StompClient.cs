@@ -208,27 +208,37 @@ namespace kirchnerd.StompNet.Internals
             return SendAsync(frame, cts.Token);
         }
 
-        public StompFrame Request(StompFrame frame, int timespan = 1000)
+        public StompFrame Request(
+            StompFrame frame,
+            Func<SendFrame, string> replySelector,
+            int timespan = 1000)
         {
             CancellationTokenSource cts = new();
             cts.CancelAfter(timespan);
-            return RequestAsync(frame, cts.Token).GetAwaiter().GetResult();
+            return RequestAsync(frame, replySelector, cts.Token).GetAwaiter().GetResult();
         }
 
-        public StompFrame Request(StompFrame frame, CancellationToken cancellationToken)
+        public StompFrame Request(
+            StompFrame frame,
+            Func<SendFrame, string> replySelector,
+            CancellationToken cancellationToken)
         {
-            return RequestAsync(frame, cancellationToken).GetAwaiter().GetResult();
+            return RequestAsync(frame, replySelector, cancellationToken).GetAwaiter().GetResult();
         }
 
-        public Task<StompFrame> RequestAsync(StompFrame frame, int timespan = 1000)
+        public Task<StompFrame> RequestAsync(
+            StompFrame frame,
+            Func<SendFrame, string> replySelector,
+            int timespan = 1000)
         {
             CancellationTokenSource cts = new();
             cts.CancelAfter(timespan);
-            return RequestAsync(frame, cts.Token);
+            return RequestAsync(frame, replySelector, cts.Token);
         }
 
         public async Task<StompFrame> RequestAsync(
             StompFrame frame,
+            Func<SendFrame, string> replySelector,
             CancellationToken cancellationToken)
         {
             if (frame is not SendFrame sendFrame)
@@ -250,7 +260,7 @@ namespace kirchnerd.StompNet.Internals
                     receivedFrame.HasHeader(StompConstants.Headers.SubscriptionId) &&
                     string.Equals(
                         receivedFrame.GetHeader(StompConstants.Headers.SubscriptionId),
-                        sendFrame.GetHeader(StompConstants.Headers.ReplyTo)));
+                        replySelector(sendFrame)));
             await SendAsync(sendFrame, cancellationToken);
             return await listenerDisposal.GetResult();
         }
