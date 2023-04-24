@@ -3,6 +3,7 @@ using System.Threading.Tasks;
 using kirchnerd.StompNet.Interfaces;
 using kirchnerd.StompNet.Internals.Interfaces;
 using kirchnerd.StompNet.Internals.Transport.Frames;
+using kirchnerd.StompNet.Validators;
 using Microsoft.Extensions.Logging;
 
 namespace kirchnerd.StompNet.Internals
@@ -16,6 +17,8 @@ namespace kirchnerd.StompNet.Internals
 
         private readonly ILogger<StompDriver> _logger;
         private readonly StompClient _stompClient;
+        private IServerSpecificValidator _frameValidator = null!;
+        private IReplyHeaderProvider _replyHeaderProvider = null!;
         private bool _disposed;
 
         /// <inheritdoc />
@@ -29,18 +32,40 @@ namespace kirchnerd.StompNet.Internals
             ILogger<StompDriver> logger,
             IConnection connection,
             StompClient stompClient,
+            string server,
             string sessionId)
         {
             Id = sessionId;
             Connection = connection;
+            Server = server;
+            InitServerSpecificHandlers();
             _stompClient = stompClient;
             _logger = logger;
+        }
+
+        private void InitServerSpecificHandlers()
+        {
+            ServerBaseStrategy strategy;
+            switch (Server)
+            {
+                case var value when value.StartsWith("RabbitMQ", StringComparison.OrdinalIgnoreCase):
+                    strategy = new RabbitMqStrategy();
+                    break;
+                default:
+                    strategy = new AnyServerStrategy();
+                    break;
+            }
+
+            _frameValidator = strategy;
+            _replyHeaderProvider = strategy;
         }
 
         public SessionState State { get; private set; } = SessionState.Established;
 
         /// <inheritdoc />
         public IConnection Connection { get; }
+
+        public string Server { get; }
 
         /// <inheritdoc />
         public string Id { get; }
@@ -51,7 +76,7 @@ namespace kirchnerd.StompNet.Internals
         /// <inheritdoc />
         public IDestination Get(string destination)
         {
-            return new StompDestination(this, _stompClient, destination);
+            return new StompDestination(this, _stompClient, _frameValidator, _replyHeaderProvider, destination);
         }
 
         /// <inheritdoc />
@@ -72,7 +97,8 @@ namespace kirchnerd.StompNet.Internals
         public async Task<MessageFrame> RequestAsync(string destination, SendFrame frame, int timeout = 1000)
         {
             frame.WithDestination(destination);
-            var response = await _stompClient.RequestAsync(frame, timeout);
+            _frameValidator.Validate(new ValidationContext(frame, isRequest: true));
+            var response = await _stompClient.RequestAsync(frame, _replyHeaderProvider.GetReplyHeader, timeout);
             return (MessageFrame)response;
         }
 
@@ -80,6 +106,7 @@ namespace kirchnerd.StompNet.Internals
         public void Send(string destination, SendFrame frame, int timeout = 1000)
         {
             frame.WithDestination(destination);
+            _frameValidator.Validate(new ValidationContext(frame, isRequest: false));
             _stompClient.Send(frame, timeout);
         }
 
@@ -87,6 +114,7 @@ namespace kirchnerd.StompNet.Internals
         public Task SendAsync(string destination, SendFrame frame, int timeout = 1000)
         {
             frame.WithDestination(destination);
+            _frameValidator.Validate(new ValidationContext(frame, isRequest: false));
             return _stompClient.SendAsync(frame, timeout);
         }
 

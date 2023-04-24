@@ -20,6 +20,13 @@ namespace kirchnerd.StompNet.Internals.Transport.Frames
             SetHeader(StompConstants.Headers.Destination, destination);
         }
 
+        /// <summary>
+        /// Sets the destination where the reply frame should be send.
+        /// </summary>
+        /// <param name="destination">The reply-destination.</param>
+        /// <remarks>
+        /// Not all stomp server implementations rely on this header-name.
+        /// </remarks>
         public void ReplyTo(string destination)
         {
             DeleteHeader(StompConstants.Headers.ReplyTo);
