@@ -20,9 +20,16 @@ jobs:
       uses: actions/setup-dotnet@v3
       with:
         dotnet-version: 6.0.x
+        source-url: https://nuget.pkg.github.com/qed87/index.json
+      env:
+        NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
     - name: Restore dependencies
       run: dotnet restore
     - name: Build
-      run: dotnet build --no-restore
+      run: dotnet build --no-restore --configuration Release 
     - name: Test
       run: dotnet test --filter TestCategory!=System --no-build --verbosity normal
+    - name: Create the package
+      run: dotnet pack --configuration Release
+    - name: Publish the package to GPR
+      run: dotnet nuget push kirchnerd.stompnet/bin/Release/*.nupkg
