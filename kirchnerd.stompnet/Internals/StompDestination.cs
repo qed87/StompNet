@@ -3,7 +3,7 @@ using System.Threading.Tasks;
 using kirchnerd.StompNet.Interfaces;
 using kirchnerd.StompNet.Internals.Interfaces;
 using kirchnerd.StompNet.Internals.Transport.Frames;
-using kirchnerd.StompNet.Validators;
+using kirchnerd.StompNet.Strategies;
 
 namespace kirchnerd.StompNet.Internals
 {
