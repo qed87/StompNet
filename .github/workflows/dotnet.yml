@@ -32,4 +32,4 @@ jobs:
     - name: Create the package
       run: dotnet pack --configuration Release
     - name: Publish the package to GPR
-      run: dotnet nuget push kirchnerd.stompnet/bin/Release/*.nupkg
+      run: dotnet nuget push kirchnerd.stompnet/bin/Release/*.nupkg --api-key ${{secrets.GITHUB_TOKEN}}
