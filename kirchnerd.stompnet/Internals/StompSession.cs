@@ -3,7 +3,7 @@ using System.Threading.Tasks;
 using kirchnerd.StompNet.Interfaces;
 using kirchnerd.StompNet.Internals.Interfaces;
 using kirchnerd.StompNet.Internals.Transport.Frames;
-using kirchnerd.StompNet.Validators;
+using kirchnerd.StompNet.Strategies;
 using Microsoft.Extensions.Logging;
 
 namespace kirchnerd.StompNet.Internals
@@ -52,7 +52,7 @@ namespace kirchnerd.StompNet.Internals
                     strategy = new RabbitMqStrategy();
                     break;
                 default:
-                    strategy = new AnyServerStrategy();
+                    strategy = new DefaultServerStrategy();
                     break;
             }
 

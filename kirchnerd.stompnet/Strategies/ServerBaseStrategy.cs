@@ -1,8 +1,11 @@
 ﻿using kirchnerd.StompNet.Internals;
 using kirchnerd.StompNet.Internals.Transport.Frames;
 
-namespace kirchnerd.StompNet.Validators;
+namespace kirchnerd.StompNet.Strategies;
 
+/// <summary>
+/// Base strategy for server specific strategies.
+/// </summary>
 public abstract class ServerBaseStrategy : IServerSpecificValidator, IReplyHeaderProvider
 {
     public virtual string GetReplyHeader(SendFrame sendFrame)
